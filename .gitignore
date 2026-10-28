@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# Build/package output
+build/
+dist/
+*.deb
+
+# Local settings/secrets
+.env
+.env.*
+!.env.example
+
+# Companion service dependencies
+companion/vendor/
+
+# Compiled GNOME schemas
+gschemas.compiled
+
+# IDE/editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
