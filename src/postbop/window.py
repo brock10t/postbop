@@ -20,6 +20,12 @@ from .storage.preferences import (
     save_preferences,
 )
 
+from .storage.composer_state import (
+    clear_composer_state,
+    load_composer_state,
+    save_composer_state,
+)
+
 logger = logging.getLogger("postbop.window")
 
 class PostBopWindow(Adw.ApplicationWindow):
@@ -40,9 +46,24 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         self.preferences = load_preferences()
 
-        self.current_action = (
-            self.preferences["last_action"]
+        self.composer_state = load_composer_state()
+
+        self.has_unfinished_composer = bool(
+            self.composer_state["text"].strip()
         )
+
+        self.composer_save_source_id = None
+        self.suppress_composer_save = False
+        self.destinations_loaded = False
+
+        if self.has_unfinished_composer:
+            self.current_action = (
+                self.composer_state["action"]
+            )
+        else:
+            self.current_action = (
+                self.preferences["last_action"]
+            )
 
         self.set_title("PostBop")
         self.set_default_size(500, 520)
@@ -87,9 +108,14 @@ class PostBopWindow(Adw.ApplicationWindow):
         self.composer.set_left_margin(8)
         self.composer.set_right_margin(8)
 
+        if self.has_unfinished_composer:
+            self.composer.get_buffer().set_text(
+                self.composer_state["text"]
+            )
+
         self.composer.get_buffer().connect(
             "changed",
-            self._update_drop_button_state,
+            self._on_composer_changed,
         )
 
         composer_scroll = Gtk.ScrolledWindow()
@@ -235,6 +261,11 @@ class PostBopWindow(Adw.ApplicationWindow):
             toolbar_view
         )
 
+        self.connect(
+            "close-request",
+            self._on_close_request,
+        )
+
         self._update_destination_mode()
 
     def _load_channels(self):
@@ -299,6 +330,8 @@ class PostBopWindow(Adw.ApplicationWindow):
         account,
         channel_groups,
     ):
+        self.suppress_composer_save = True
+
         self._clear_channel_box()
 
         self.organizations = account.get(
@@ -323,11 +356,18 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         self.channel_buttons.clear()
 
-        saved_organization_id = (
-            self.preferences[
-                "last_idea_organization_id"
-            ]
-        )
+        if self.has_unfinished_composer:
+            saved_organization_id = (
+                self.composer_state[
+                    "organization_id"
+                ]
+            )
+        else:
+            saved_organization_id = (
+                self.preferences[
+                    "last_idea_organization_id"
+                ]
+            )
 
         selected_organization = 0
 
@@ -348,11 +388,18 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         self.channel_buttons.clear()
 
-        saved_channel_ids = set(
-            self.preferences[
-                "last_channel_ids"
-            ]
-        )
+        if self.has_unfinished_composer:
+            saved_channel_ids = set(
+                self.composer_state[
+                    "channel_ids"
+                ]
+            )
+        else:
+            saved_channel_ids = set(
+                self.preferences[
+                    "last_channel_ids"
+                ]
+            )
 
         if not channel_groups:
             label = Gtk.Label(
@@ -363,12 +410,6 @@ class PostBopWindow(Adw.ApplicationWindow):
             self.channel_box.append(label)
 
             return
-
-        saved_channel_ids = set(
-            self.preferences[
-                "last_channel_ids"
-            ]
-        )
 
         channel_count = 0
 
@@ -431,7 +472,7 @@ class PostBopWindow(Adw.ApplicationWindow):
 
                 button.connect(
                     "toggled",
-                    self._update_drop_button_state,
+                    self._on_channel_toggled,
                 )
 
                 if unavailable_reason:
@@ -460,6 +501,9 @@ class PostBopWindow(Adw.ApplicationWindow):
             f"{'channel' if channel_count == 1 else 'channels'} "
             "available."
         )
+
+        self.destinations_loaded = True
+        self.suppress_composer_save = False
 
         self._update_drop_button_state()
 
@@ -494,6 +538,7 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         self._update_destination_mode()
         self._update_drop_button_state()
+        self._schedule_composer_state_save()
 
 
     def _update_destination_mode(self):
@@ -549,6 +594,7 @@ class PostBopWindow(Adw.ApplicationWindow):
         _parameter,
     ):
         self._update_drop_button_state()
+        self._schedule_composer_state_save()
 
     def _get_composer_text(self) -> str:
         buffer = self.composer.get_buffer()
@@ -807,7 +853,20 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         buffer = self.composer.get_buffer()
 
+        self.suppress_composer_save = True
         buffer.set_text("")
+        self.suppress_composer_save = False
+
+        clear_composer_state()
+
+        self.composer_state = {
+            "text": "",
+            "action": "queue",
+            "channel_ids": [],
+            "organization_id": None,
+        }
+
+        self.has_unfinished_composer = False
 
         if action == "idea":
             self.status_label.set_text(
@@ -860,3 +919,116 @@ class PostBopWindow(Adw.ApplicationWindow):
             logger.exception(
                 "Unable to save PostBop preferences"
             )
+
+    def _on_composer_changed(
+        self,
+        _buffer,
+    ):
+        self._update_drop_button_state()
+        self._schedule_composer_state_save()
+
+
+    def _on_channel_toggled(
+        self,
+        _button,
+    ):
+        self._update_drop_button_state()
+        self._schedule_composer_state_save()
+
+    def _schedule_composer_state_save(
+        self,
+    ):
+        if self.suppress_composer_save:
+            return
+
+        if self.composer_save_source_id is not None:
+            GLib.source_remove(
+                self.composer_save_source_id
+            )
+
+        self.composer_save_source_id = (
+            GLib.timeout_add(
+                500,
+                self._save_composer_state,
+            )
+        )
+
+
+    def _save_composer_state(self):
+        self.composer_save_source_id = None
+
+        text = self._get_composer_text()
+
+        if not text.strip():
+            clear_composer_state()
+
+            self.has_unfinished_composer = False
+
+            return False
+
+        if self.destinations_loaded:
+            channel_ids = [
+                channel["id"]
+                for channel
+                in self._get_selected_channels()
+            ]
+
+            organization = (
+                self._get_selected_organization()
+            )
+
+            organization_id = (
+                organization["id"]
+                if organization is not None
+                else None
+            )
+
+        else:
+            # Preserve recovered destinations until
+            # Buffer data has finished loading.
+            channel_ids = (
+                self.composer_state[
+                    "channel_ids"
+                ]
+            )
+
+            organization_id = (
+                self.composer_state[
+                    "organization_id"
+                ]
+            )
+
+        state = {
+            "text": text,
+            "action": self.current_action,
+            "channel_ids": channel_ids,
+            "organization_id": organization_id,
+        }
+
+        try:
+            save_composer_state(state)
+
+            self.composer_state = state
+            self.has_unfinished_composer = True
+
+        except OSError:
+            logger.exception(
+                "Unable to save unfinished composer"
+            )
+
+        return False
+
+    def _on_close_request(
+        self,
+        _window,
+    ):
+        if self.composer_save_source_id is not None:
+            GLib.source_remove(
+                self.composer_save_source_id
+            )
+
+            self.composer_save_source_id = None
+
+        self._save_composer_state()
+
+        return False
