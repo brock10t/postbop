@@ -230,3 +230,157 @@ def create_queue_post(
         )
 
     return post
+
+def create_draft_post(
+    channel_id: str,
+    text: str,
+) -> dict:
+    if not text.strip():
+        raise ValueError(
+            "Post text cannot be empty"
+        )
+
+    query = """
+    mutation CreateDraftPost(
+        $text: String!
+        $channelId: ChannelId!
+    ) {
+        createPost(
+            input: {
+                text: $text
+                channelId: $channelId
+                schedulingType: automatic
+                mode: addToQueue
+                saveToDraft: true
+            }
+        ) {
+            __typename
+
+            ... on PostActionSuccess {
+                post {
+                    id
+                    text
+                    status
+                }
+            }
+
+            ... on MutationError {
+                message
+            }
+        }
+    }
+    """
+
+    data = _graphql_request(
+        query,
+        {
+            "text": text,
+            "channelId": channel_id,
+        },
+    )
+
+    result = data.get("createPost")
+
+    if not isinstance(result, dict):
+        raise BufferApiError(
+            "Buffer returned an invalid draft response"
+        )
+
+    result_type = result.get("__typename")
+
+    if result_type == "MutationError":
+        raise BufferApiError(
+            result.get(
+                "message",
+                "Buffer could not create the draft",
+            )
+        )
+
+    if result_type != "PostActionSuccess":
+        raise BufferApiError(
+            "Buffer returned an unexpected draft result"
+        )
+
+    post = result.get("post")
+
+    if not isinstance(post, dict):
+        raise BufferApiError(
+            "Buffer did not return the created draft"
+        )
+
+    return post
+
+def create_idea(
+    organization_id: str,
+    text: str,
+) -> dict:
+    if not text.strip():
+        raise ValueError(
+            "Idea text cannot be empty"
+        )
+
+    query = """
+    mutation CreateIdea(
+        $organizationId: ID!
+        $text: String!
+    ) {
+        createIdea(
+            input: {
+                organizationId: $organizationId
+                content: {
+                    text: $text
+                }
+            }
+        ) {
+            __typename
+
+            ... on Idea {
+                id
+                organizationId
+                content {
+                    text
+                    title
+                }
+            }
+
+            ... on MutationError {
+                message
+            }
+        }
+    }
+    """
+
+    data = _graphql_request(
+        query,
+        {
+            "organizationId": organization_id,
+            "text": text,
+        },
+    )
+
+    result = data.get("createIdea")
+
+    if not isinstance(result, dict):
+        raise BufferApiError(
+            "Buffer returned an invalid idea response"
+        )
+
+    result_type = result.get("__typename")
+
+    if result_type == "MutationError":
+        raise BufferApiError(
+            result.get(
+                "message",
+                "Buffer could not create the idea",
+            )
+        )
+
+    if result_type != "Idea":
+        raise BufferApiError(
+            result.get(
+                "message",
+                "Buffer returned an unexpected idea result",
+            )
+        )
+
+    return result

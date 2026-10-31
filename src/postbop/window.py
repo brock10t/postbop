@@ -8,9 +8,16 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import Adw, GLib, Gtk
 
 from .api.buffer_client import (
+    create_draft_post,
+    create_idea,
     create_queue_post,
     get_account,
     get_channels,
+)
+
+from .storage.preferences import (
+    load_preferences,
+    save_preferences,
 )
 
 logger = logging.getLogger("postbop.window")
@@ -23,6 +30,19 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         self.channel_buttons = {}
         self.is_submitting = False
+        self.organizations = []
+
+        self.action_keys = [
+            "queue",
+            "draft",
+            "idea",
+        ]
+
+        self.preferences = load_preferences()
+
+        self.current_action = (
+            self.preferences["last_action"]
+        )
 
         self.set_title("PostBop")
         self.set_default_size(500, 520)
@@ -31,6 +51,14 @@ class PostBopWindow(Adw.ApplicationWindow):
         self._load_channels()
 
     def _build_ui(self):
+        toolbar_view = Adw.ToolbarView()
+
+        header_bar = Adw.HeaderBar()
+
+        toolbar_view.add_top_bar(
+            header_bar
+        )
+
         root = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL,
             spacing=12,
@@ -40,14 +68,6 @@ class PostBopWindow(Adw.ApplicationWindow):
         root.set_margin_bottom(18)
         root.set_margin_start(18)
         root.set_margin_end(18)
-
-        title = Gtk.Label(
-            label="PostBop",
-            xalign=0,
-        )
-        title.add_css_class("title-2")
-
-        root.append(title)
 
         composer_label = Gtk.Label(
             label="Post",
@@ -79,13 +99,47 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         root.append(composer_scroll)
 
-        channel_label = Gtk.Label(
+        action_label = Gtk.Label(
+            label="Action",
+            xalign=0,
+        )
+        action_label.add_css_class("heading")
+
+        root.append(action_label)
+
+        self.action_dropdown = Gtk.DropDown.new_from_strings([
+            "Drop to Queue",
+            "Drop to Draft",
+            "Drop Idea",
+        ])
+
+        self.action_dropdown.set_selected(
+            self.action_keys.index(
+                self.current_action
+            )
+        )
+
+        self.action_dropdown.connect(
+            "notify::selected",
+            self._on_action_changed,
+        )
+
+        root.append(self.action_dropdown)
+
+        self.destination_label = Gtk.Label(
             label="Channels",
             xalign=0,
         )
-        channel_label.add_css_class("heading")
 
-        root.append(channel_label)
+        self.destination_label.add_css_class(
+            "heading"
+        )
+
+        root.append(
+            self.destination_label
+        )
+
+        self.destination_stack = Gtk.Stack()
 
         self.channel_box = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL,
@@ -107,7 +161,47 @@ class PostBopWindow(Adw.ApplicationWindow):
             self.channel_box
         )
 
-        root.append(channel_scroll)
+        self.destination_stack.add_named(
+            channel_scroll,
+            "channels",
+        )
+
+        self.organization_model = Gtk.StringList()
+
+        self.organization_dropdown = Gtk.DropDown(
+            model=self.organization_model,
+        )
+
+        self.organization_dropdown.set_sensitive(
+            False
+        )
+
+        self.organization_dropdown.connect(
+            "notify::selected",
+            self._on_organization_changed,
+        )
+
+        organization_box = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=6,
+        )
+
+        organization_box.append(
+            self.organization_dropdown
+        )
+
+        self.destination_stack.add_named(
+            organization_box,
+            "organization",
+        )
+
+        self.destination_stack.set_visible_child_name(
+            "channels"
+        )
+
+        root.append(
+            self.destination_stack
+        )
 
         self.status_label = Gtk.Label(
             label="",
@@ -135,7 +229,13 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         root.append(self.drop_button)
 
-        self.set_content(root)
+        toolbar_view.set_content(root)
+
+        self.set_content(
+            toolbar_view
+        )
+
+        self._update_destination_mode()
 
     def _load_channels(self):
         logger.debug(
@@ -170,6 +270,7 @@ class PostBopWindow(Adw.ApplicationWindow):
 
             GLib.idle_add(
                 self._populate_channels,
+                account,
                 channel_groups,
             )
 
@@ -195,11 +296,63 @@ class PostBopWindow(Adw.ApplicationWindow):
 
     def _populate_channels(
         self,
+        account,
         channel_groups,
     ):
         self._clear_channel_box()
 
+        self.organizations = account.get(
+            "organizations",
+            [],
+        )
+
+        self.organization_model.splice(
+            0,
+            self.organization_model.get_n_items(),
+            [],
+        )
+
+        for organization in self.organizations:
+            self.organization_model.append(
+                organization["name"]
+            )
+
+        self.organization_dropdown.set_sensitive(
+            bool(self.organizations)
+        )
+
         self.channel_buttons.clear()
+
+        saved_organization_id = (
+            self.preferences[
+                "last_idea_organization_id"
+            ]
+        )
+
+        selected_organization = 0
+
+        for index, organization in enumerate(
+            self.organizations
+        ):
+            if (
+                organization["id"]
+                == saved_organization_id
+            ):
+                selected_organization = index
+                break
+
+        if self.organizations:
+            self.organization_dropdown.set_selected(
+                selected_organization
+            )
+
+        self.channel_buttons.clear()
+
+        saved_channel_ids = set(
+            self.preferences[
+                "last_channel_ids"
+            ]
+        )
 
         if not channel_groups:
             label = Gtk.Label(
@@ -210,6 +363,12 @@ class PostBopWindow(Adw.ApplicationWindow):
             self.channel_box.append(label)
 
             return
+
+        saved_channel_ids = set(
+            self.preferences[
+                "last_channel_ids"
+            ]
+        )
 
         channel_count = 0
 
@@ -265,6 +424,11 @@ class PostBopWindow(Adw.ApplicationWindow):
                     label=label
                 )
 
+                button.set_active(
+                    channel["id"]
+                    in saved_channel_ids
+                )
+
                 button.connect(
                     "toggled",
                     self._update_drop_button_state,
@@ -314,6 +478,78 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         self.status_label.set_text(message)
 
+    def _on_action_changed(
+        self,
+        _dropdown,
+        _parameter,
+    ):
+        selected = self.action_dropdown.get_selected()
+
+        if selected >= len(self.action_keys):
+            return
+
+        self.current_action = self.action_keys[
+            selected
+        ]
+
+        self._update_destination_mode()
+        self._update_drop_button_state()
+
+
+    def _update_destination_mode(self):
+        if self.current_action == "idea":
+            self.destination_label.set_text(
+                "Organization"
+            )
+
+            self.destination_stack.set_visible_child_name(
+                "organization"
+            )
+
+            if not self.is_submitting:
+                self.drop_button.set_label(
+                    "Drop Idea"
+                )
+
+        else:
+            self.destination_label.set_text(
+                "Channels"
+            )
+
+            self.destination_stack.set_visible_child_name(
+                "channels"
+            )
+
+            if not self.is_submitting:
+                if self.current_action == "draft":
+                    self.drop_button.set_label(
+                        "Drop to Draft"
+                    )
+                else:
+                    self.drop_button.set_label(
+                        "Drop to Queue"
+                    )
+
+    def _get_selected_organization(
+        self,
+    ) -> dict | None:
+        selected = (
+            self.organization_dropdown.get_selected()
+        )
+
+        if selected >= len(self.organizations):
+            return None
+
+        return self.organizations[selected]
+
+
+    def _on_organization_changed(
+        self,
+        _dropdown,
+        _parameter,
+    ):
+        self._update_drop_button_state()
+
     def _get_composer_text(self) -> str:
         buffer = self.composer.get_buffer()
 
@@ -353,13 +589,20 @@ class PostBopWindow(Adw.ApplicationWindow):
         text = self._get_composer_text()
 
         has_text = bool(text.strip())
-        has_channels = bool(
-            self._get_selected_channels()
-        )
+
+        if self.current_action == "idea":
+            has_destination = (
+                self._get_selected_organization()
+                is not None
+            )
+        else:
+            has_destination = bool(
+                self._get_selected_channels()
+            )
 
         self.drop_button.set_sensitive(
             has_text
-            and has_channels
+            and has_destination
             and not self.is_submitting
         )
 
@@ -368,6 +611,15 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         self.composer.set_sensitive(
             not submitting
+        )
+
+        self.action_dropdown.set_sensitive(
+            not submitting
+        )
+
+        self.organization_dropdown.set_sensitive(
+            bool(self.organizations)
+            and not submitting
         )
 
         for entry in self.channel_buttons.values():
@@ -381,33 +633,70 @@ class PostBopWindow(Adw.ApplicationWindow):
                 "Dropping..."
             )
         else:
-            self.drop_button.set_label(
-                "Drop to Queue"
-            )
+            self._update_destination_mode()
 
         self._update_drop_button_state()
 
     def _on_drop_clicked(self, _button):
         text = self._get_composer_text()
-        channels = self._get_selected_channels()
 
-        if not text.strip() or not channels:
+        if not text.strip():
             return
 
-        channel_count = len(channels)
+        action = self.current_action
 
-        self.status_label.set_text(
-            f"Dropping to {channel_count} "
-            f"{'channel' if channel_count == 1 else 'channels'}..."
+        if action == "idea":
+            organization = (
+                self._get_selected_organization()
+            )
+
+            if organization is None:
+                return
+
+            destinations = [{
+                "id": organization["id"],
+                "name": organization["name"],
+            }]
+
+        else:
+            destinations = (
+                self._get_selected_channels()
+            )
+
+            if not destinations:
+                return
+
+        destination_count = len(
+            destinations
         )
+
+        if action == "idea":
+            self.status_label.set_text(
+                "Dropping Idea..."
+            )
+
+        elif action == "draft":
+            self.status_label.set_text(
+                f"Dropping to Draft for "
+                f"{destination_count} "
+                f"{'channel' if destination_count == 1 else 'channels'}..."
+            )
+
+        else:
+            self.status_label.set_text(
+                f"Dropping to "
+                f"{destination_count} "
+                f"{'channel' if destination_count == 1 else 'channels'}..."
+            )
 
         self._set_submitting(True)
 
         thread = threading.Thread(
             target=self._drop_posts_worker,
             args=(
+                action,
                 text,
-                channels,
+                destinations,
             ),
             daemon=True,
         )
@@ -416,48 +705,68 @@ class PostBopWindow(Adw.ApplicationWindow):
 
     def _drop_posts_worker(
         self,
+        action: str,
         text: str,
-        channels: list[dict],
+        destinations: list[dict],
     ):
         successes = []
         failures = []
 
-        for channel in channels:
+        for destination in destinations:
             try:
-                post = create_queue_post(
-                    channel["id"],
-                    text,
-                )
+                if action == "idea":
+                    result = create_idea(
+                        destination["id"],
+                        text,
+                    )
+
+                elif action == "draft":
+                    result = create_draft_post(
+                        destination["id"],
+                        text,
+                    )
+
+                else:
+                    result = create_queue_post(
+                        destination["id"],
+                        text,
+                    )
 
                 successes.append({
-                    "channel": channel,
-                    "post": post,
+                    "destination": destination,
+                    "result": result,
                 })
 
                 logger.info(
-                    "Queued post for Buffer channel %s",
-                    channel["id"],
+                    "Completed Buffer %s action for %s",
+                    action,
+                    destination["id"],
                 )
 
             except Exception as exception:
                 logger.exception(
-                    "Unable to queue post for Buffer channel %s",
-                    channel["id"],
+                    "Unable to complete Buffer %s action for %s",
+                    action,
+                    destination["id"],
                 )
 
                 failures.append({
-                    "channel": channel,
+                    "destination": destination,
                     "error": str(exception),
                 })
 
         GLib.idle_add(
             self._finish_drop,
+            action,
+            destinations,
             successes,
             failures,
         )
 
     def _finish_drop(
         self,
+        action: str,
+        destinations: list[dict],
         successes: list[dict],
         failures: list[dict],
     ):
@@ -470,31 +779,84 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         if failures:
             failed_names = ", ".join(
-                failure["channel"]["name"]
+                failure[
+                    "destination"
+                ]["name"]
                 for failure in failures
             )
 
             if successes:
                 self.status_label.set_text(
-                    f"Dropped to {len(successes)} "
-                    f"of {total} channels. "
+                    f"Completed {len(successes)} "
+                    f"of {total}. "
                     f"Failed: {failed_names}"
                 )
             else:
                 self.status_label.set_text(
-                    f"Unable to drop post. "
+                    f"Unable to complete action. "
                     f"Failed: {failed_names}"
                 )
 
+            # Preserve the composer and selections.
             return
+
+        self._remember_successful_action(
+            action,
+            destinations,
+        )
 
         buffer = self.composer.get_buffer()
 
         buffer.set_text("")
 
-        self.status_label.set_text(
-            f"Dropped to {len(successes)} Buffer "
-            f"{'channel' if len(successes) == 1 else 'channels'}."
-        )
+        if action == "idea":
+            self.status_label.set_text(
+                "Idea dropped to Buffer."
+            )
+
+        elif action == "draft":
+            self.status_label.set_text(
+                f"Dropped to Draft for "
+                f"{len(successes)} Buffer "
+                f"{'channel' if len(successes) == 1 else 'channels'}."
+            )
+
+        else:
+            self.status_label.set_text(
+                f"Dropped to {len(successes)} Buffer "
+                f"{'channel' if len(successes) == 1 else 'channels'}."
+            )
 
         self.composer.grab_focus()
+
+    def _remember_successful_action(
+        self,
+        action: str,
+        destinations: list[dict],
+    ):
+        self.preferences[
+            "last_action"
+        ] = action
+
+        if action == "idea":
+            self.preferences[
+                "last_idea_organization_id"
+            ] = destinations[0]["id"]
+
+        else:
+            self.preferences[
+                "last_channel_ids"
+            ] = [
+                destination["id"]
+                for destination in destinations
+            ]
+
+        try:
+            save_preferences(
+                self.preferences
+            )
+
+        except OSError:
+            logger.exception(
+                "Unable to save PostBop preferences"
+            )
