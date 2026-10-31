@@ -31,6 +31,14 @@ class PostBopWindow(Adw.ApplicationWindow):
         self._load_channels()
 
     def _build_ui(self):
+        toolbar_view = Adw.ToolbarView()
+
+        header_bar = Adw.HeaderBar()
+
+        toolbar_view.add_top_bar(
+            header_bar
+        )
+
         root = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL,
             spacing=12,
@@ -40,14 +48,6 @@ class PostBopWindow(Adw.ApplicationWindow):
         root.set_margin_bottom(18)
         root.set_margin_start(18)
         root.set_margin_end(18)
-
-        title = Gtk.Label(
-            label="PostBop",
-            xalign=0,
-        )
-        title.add_css_class("title-2")
-
-        root.append(title)
 
         composer_label = Gtk.Label(
             label="Post",
@@ -135,7 +135,11 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         root.append(self.drop_button)
 
-        self.set_content(root)
+        toolbar_view.set_content(root)
+
+        self.set_content(
+            toolbar_view
+        )
 
     def _load_channels(self):
         logger.debug(
