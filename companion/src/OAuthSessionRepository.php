@@ -84,4 +84,102 @@ class OAuthSessionRepository
 
         return $statement->rowCount() === 1;
     }
+
+    public function claimResult(string $stateHash): array
+    {
+        $this->connection->beginTransaction();
+
+        try {
+            $statement = $this->connection->prepare(
+                '
+                SELECT
+                    authorization_code,
+                    oauth_error,
+                    claimed_at,
+                    expires_at > CURRENT_TIMESTAMP AS active
+                FROM oauth_sessions
+                WHERE state_hash = :state_hash
+                FOR UPDATE
+                '
+            );
+
+            $statement->execute([
+                'state_hash' => $stateHash,
+            ]);
+
+            $session = $statement->fetch();
+
+            if (!$session) {
+                $this->connection->rollBack();
+
+                return [
+                    'status' => 'invalid',
+                ];
+            }
+
+            if ($session['claimed_at'] !== null) {
+                $this->connection->rollBack();
+
+                return [
+                    'status' => 'claimed',
+                ];
+            }
+
+            if ((int) $session['active'] !== 1) {
+                $this->connection->rollBack();
+
+                return [
+                    'status' => 'expired',
+                ];
+            }
+
+            if (
+                $session['authorization_code'] === null &&
+                $session['oauth_error'] === null
+            ) {
+                $this->connection->rollBack();
+
+                return [
+                    'status' => 'pending',
+                ];
+            }
+
+            if ($session['authorization_code'] !== null) {
+                $result = [
+                    'status' => 'complete',
+                    'code' => $session['authorization_code'],
+                ];
+            } else {
+                $result = [
+                    'status' => 'error',
+                    'error' => $session['oauth_error'],
+                ];
+            }
+
+            $statement = $this->connection->prepare(
+                '
+                UPDATE oauth_sessions
+                SET
+                    claimed_at = CURRENT_TIMESTAMP,
+                    authorization_code = NULL,
+                    oauth_error = NULL
+                WHERE state_hash = :state_hash
+                '
+            );
+
+            $statement->execute([
+                'state_hash' => $stateHash,
+            ]);
+
+            $this->connection->commit();
+
+            return $result;
+        } catch (\Throwable $exception) {
+            if ($this->connection->inTransaction()) {
+                $this->connection->rollBack();
+            }
+
+            throw $exception;
+        }
+    }
 }

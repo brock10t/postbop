@@ -70,6 +70,95 @@ try {
         exit;
     }
 
+    if ($method === 'POST' && $path === '/oauth/result') {
+        $body = json_decode(
+            file_get_contents('php://input'),
+            true
+        );
+
+        $state = $body['state'] ?? null;
+
+        if (
+            !is_string($state) ||
+            !preg_match('/^[A-Za-z0-9_-]{32,256}$/', $state)
+        ) {
+            header('Content-Type: application/json');
+            http_response_code(400);
+
+            echo json_encode([
+                'error' => 'invalid_state',
+            ]);
+
+            exit;
+        }
+
+        $stateHash = hash('sha256', $state);
+
+        $repository = new OAuthSessionRepository(
+            $database->connection()
+        );
+
+        $result = $repository->claimResult(
+            $stateHash
+        );
+
+        header('Content-Type: application/json');
+
+        switch ($result['status']) {
+            case 'pending':
+                http_response_code(202);
+
+                echo json_encode([
+                    'status' => 'pending',
+                ]);
+                break;
+
+            case 'complete':
+                http_response_code(200);
+
+                echo json_encode([
+                    'status' => 'complete',
+                    'code' => $result['code'],
+                ]);
+                break;
+
+            case 'error':
+                http_response_code(200);
+
+                echo json_encode([
+                    'status' => 'error',
+                    'error' => $result['error'],
+                ]);
+                break;
+
+            case 'expired':
+                http_response_code(410);
+
+                echo json_encode([
+                    'error' => 'session_expired',
+                ]);
+                break;
+
+            case 'claimed':
+                http_response_code(410);
+
+                echo json_encode([
+                    'error' => 'result_already_claimed',
+                ]);
+                break;
+
+            default:
+                http_response_code(404);
+
+                echo json_encode([
+                    'error' => 'session_not_found',
+                ]);
+                break;
+        }
+
+        exit;
+    }
+
     if ($method === 'GET' && $path === '/oauth/callback') {
         $state = $_GET['state'] ?? null;
         $code = $_GET['code'] ?? null;
