@@ -11,3 +11,5 @@ BUFFER_SCOPES = [
     "ideas:write",
     "offline_access",
 ]
+
+COMPANION_BASE_URL = "https://postbop.10t.co"

@@ -11,7 +11,7 @@ from postbop.config import (
 )
 
 def generate_code_verifier() -> str:
-    return secrets.token_urlsafe(64)
+    return secrets.token_urlsafe(32)
 
 def generate_code_challenge(code_verifier: str) -> str:
     digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
@@ -20,6 +20,11 @@ def generate_code_challenge(code_verifier: str) -> str:
 
 def generate_state() -> str:
     return secrets.token_urlsafe(32)
+
+def hash_state(state: str) -> str:
+    return hashlib.sha256(
+        state.encode("ascii")
+    ).hexdigest()
 
 def build_authorization_url(
     code_challenge: str,
