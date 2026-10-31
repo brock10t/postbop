@@ -7,7 +7,11 @@ gi.require_version("Gtk", "4.0")
 
 from gi.repository import Adw, GLib, Gtk
 
-from .api.buffer_client import get_account, get_channels
+from .api.buffer_client import (
+    create_queue_post,
+    get_account,
+    get_channels,
+)
 
 logger = logging.getLogger("postbop.window")
 
@@ -18,6 +22,7 @@ class PostBopWindow(Adw.ApplicationWindow):
         logger.debug("Initializing PostBop window")
 
         self.channel_buttons = {}
+        self.is_submitting = False
 
         self.set_title("PostBop")
         self.set_default_size(500, 520)
@@ -61,6 +66,11 @@ class PostBopWindow(Adw.ApplicationWindow):
         self.composer.set_bottom_margin(8)
         self.composer.set_left_margin(8)
         self.composer.set_right_margin(8)
+
+        self.composer.get_buffer().connect(
+            "changed",
+            self._update_drop_button_state,
+        )
 
         composer_scroll = Gtk.ScrolledWindow()
         composer_scroll.set_min_content_height(150)
@@ -116,7 +126,11 @@ class PostBopWindow(Adw.ApplicationWindow):
             "suggested-action"
         )
 
-        # Posting will be wired in the next step.
+        self.drop_button.connect(
+            "clicked",
+            self._on_drop_clicked,
+        )
+        
         self.drop_button.set_sensitive(False)
 
         root.append(self.drop_button)
@@ -251,6 +265,11 @@ class PostBopWindow(Adw.ApplicationWindow):
                     label=label
                 )
 
+                button.connect(
+                    "toggled",
+                    self._update_drop_button_state,
+                )
+
                 if unavailable_reason:
                     button.set_sensitive(False)
 
@@ -262,6 +281,7 @@ class PostBopWindow(Adw.ApplicationWindow):
                     "button": button,
                     "channel": channel,
                     "organization": organization,
+                    "available": unavailable_reason is None,
                 }
 
                 channel_count += 1
@@ -277,6 +297,8 @@ class PostBopWindow(Adw.ApplicationWindow):
             "available."
         )
 
+        self._update_drop_button_state()
+
     def _show_channel_error(
         self,
         message: str,
@@ -291,3 +313,188 @@ class PostBopWindow(Adw.ApplicationWindow):
         self.channel_box.append(label)
 
         self.status_label.set_text(message)
+
+    def _get_composer_text(self) -> str:
+        buffer = self.composer.get_buffer()
+
+        start, end = buffer.get_bounds()
+
+        return buffer.get_text(
+            start,
+            end,
+            False,
+        )
+
+    def _get_selected_channels(self) -> list[dict]:
+        selected = []
+
+        for channel_id, entry in self.channel_buttons.items():
+            if not entry["button"].get_active():
+                continue
+
+            channel = entry["channel"]
+
+            selected.append({
+                "id": channel_id,
+                "name": (
+                    channel.get("displayName")
+                    or channel.get("name")
+                    or "Unnamed channel"
+                ),
+                "service": channel.get(
+                    "service",
+                    "unknown",
+                ),
+            })
+
+        return selected
+
+    def _update_drop_button_state(self, *_args):
+        text = self._get_composer_text()
+
+        has_text = bool(text.strip())
+        has_channels = bool(
+            self._get_selected_channels()
+        )
+
+        self.drop_button.set_sensitive(
+            has_text
+            and has_channels
+            and not self.is_submitting
+        )
+
+    def _set_submitting(self, submitting: bool):
+        self.is_submitting = submitting
+
+        self.composer.set_sensitive(
+            not submitting
+        )
+
+        for entry in self.channel_buttons.values():
+            entry["button"].set_sensitive(
+                entry["available"]
+                and not submitting
+            )
+
+        if submitting:
+            self.drop_button.set_label(
+                "Dropping..."
+            )
+        else:
+            self.drop_button.set_label(
+                "Drop to Queue"
+            )
+
+        self._update_drop_button_state()
+
+    def _on_drop_clicked(self, _button):
+        text = self._get_composer_text()
+        channels = self._get_selected_channels()
+
+        if not text.strip() or not channels:
+            return
+
+        channel_count = len(channels)
+
+        self.status_label.set_text(
+            f"Dropping to {channel_count} "
+            f"{'channel' if channel_count == 1 else 'channels'}..."
+        )
+
+        self._set_submitting(True)
+
+        thread = threading.Thread(
+            target=self._drop_posts_worker,
+            args=(
+                text,
+                channels,
+            ),
+            daemon=True,
+        )
+
+        thread.start()
+
+    def _drop_posts_worker(
+        self,
+        text: str,
+        channels: list[dict],
+    ):
+        successes = []
+        failures = []
+
+        for channel in channels:
+            try:
+                post = create_queue_post(
+                    channel["id"],
+                    text,
+                )
+
+                successes.append({
+                    "channel": channel,
+                    "post": post,
+                })
+
+                logger.info(
+                    "Queued post for Buffer channel %s",
+                    channel["id"],
+                )
+
+            except Exception as exception:
+                logger.exception(
+                    "Unable to queue post for Buffer channel %s",
+                    channel["id"],
+                )
+
+                failures.append({
+                    "channel": channel,
+                    "error": str(exception),
+                })
+
+        GLib.idle_add(
+            self._finish_drop,
+            successes,
+            failures,
+        )
+
+    def _finish_drop(
+        self,
+        successes: list[dict],
+        failures: list[dict],
+    ):
+        self._set_submitting(False)
+
+        total = (
+            len(successes)
+            + len(failures)
+        )
+
+        if failures:
+            failed_names = ", ".join(
+                failure["channel"]["name"]
+                for failure in failures
+            )
+
+            if successes:
+                self.status_label.set_text(
+                    f"Dropped to {len(successes)} "
+                    f"of {total} channels. "
+                    f"Failed: {failed_names}"
+                )
+            else:
+                self.status_label.set_text(
+                    f"Unable to drop post. "
+                    f"Failed: {failed_names}"
+                )
+
+            return
+
+        buffer = self.composer.get_buffer()
+
+        buffer.set_text("")
+
+        self.status_label.set_text(
+            f"Dropped to {len(successes)} Buffer "
+            f"{'channel' if len(successes) == 1 else 'channels'}."
+        )
+
+        self.composer.grab_focus()
