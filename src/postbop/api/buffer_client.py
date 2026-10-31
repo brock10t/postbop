@@ -151,3 +151,82 @@ def get_channels(organization_id: str) -> list[dict]:
     )
 
     return data["channels"]
+
+def create_queue_post(
+    channel_id: str,
+    text: str,
+) -> dict:
+    if not text.strip():
+        raise ValueError(
+            "Post text cannot be empty"
+        )
+
+    query = """
+    mutation CreateQueuePost(
+        $text: String!
+        $channelId: ChannelId!
+    ) {
+        createPost(
+            input: {
+                text: $text
+                channelId: $channelId
+                schedulingType: automatic
+                mode: addToQueue
+            }
+        ) {
+            __typename
+
+            ... on PostActionSuccess {
+                post {
+                    id
+                    text
+                    dueAt
+                    status
+                }
+            }
+
+            ... on MutationError {
+                message
+            }
+        }
+    }
+    """
+
+    data = _graphql_request(
+        query,
+        {
+            "text": text,
+            "channelId": channel_id,
+        },
+    )
+
+    result = data.get("createPost")
+
+    if not isinstance(result, dict):
+        raise BufferApiError(
+            "Buffer returned an invalid post response"
+        )
+
+    result_type = result.get("__typename")
+
+    if result_type == "MutationError":
+        raise BufferApiError(
+            result.get(
+                "message",
+                "Buffer could not create the post",
+            )
+        )
+
+    if result_type != "PostActionSuccess":
+        raise BufferApiError(
+            "Buffer returned an unexpected post result"
+        )
+
+    post = result.get("post")
+
+    if not isinstance(post, dict):
+        raise BufferApiError(
+            "Buffer did not return the created post"
+        )
+
+    return post
