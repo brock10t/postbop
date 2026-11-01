@@ -18,6 +18,26 @@ from .api.buffer_client import (
     BufferRateLimitError,
 )
 
+from .api.buffer_auth import exchange_authorization_code
+
+from .api.companion import (
+    create_oauth_session,
+    get_oauth_result,
+)
+
+from .api.oauth import (
+    build_authorization_url,
+    generate_code_challenge,
+    generate_code_verifier,
+    generate_state,
+    hash_state,
+)
+
+from .storage.credentials import (
+    load_access_token,
+    load_refresh_token,
+)
+
 from .storage.preferences import (
     load_preferences,
     save_preferences,
@@ -42,6 +62,10 @@ class PostBopWindow(Adw.ApplicationWindow):
         self.channel_buttons = {}
         self.is_submitting = False
         self.organizations = []
+
+        self.auth_in_progress = False
+
+        self.buffer_connected = bool( load_access_token() and load_refresh_token() )
 
         self.action_keys = [
             "queue",
@@ -82,7 +106,10 @@ class PostBopWindow(Adw.ApplicationWindow):
         self.set_default_size(500, 520)
 
         self._build_ui()
-        self._load_channels()
+        if self.buffer_connected:
+            self._load_channels()
+        else:
+            self._show_disconnected_state()
 
     def _build_ui(self):
         toolbar_view = Adw.ToolbarView()
@@ -187,6 +214,23 @@ class PostBopWindow(Adw.ApplicationWindow):
         )
 
         self.destination_stack = Gtk.Stack()
+
+        self.connect_box = Gtk.Box( orientation=Gtk.Orientation.VERTICAL, spacing=8 )
+
+        connect_label = Gtk.Label( label=(
+            "Connect PostBop to Buffer to choose "
+            "channels and start dropping posts."
+        ), xalign=0 )
+        connect_label.set_wrap( True )
+        self.connect_box.append( connect_label )
+
+        self.connect_button = Gtk.Button( label="Connect Buffer" )
+        self.connect_button.set_halign( Gtk.Align.START )
+        self.connect_button.add_css_class( "suggested-action" )
+        self.connect_button.connect( "clicked", self._on_connect_clicked )
+        self.connect_box.append( self.connect_button )
+
+        self.destination_stack.add_named( self.connect_box, "connect" )
 
         self.channel_box = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL,
@@ -400,6 +444,7 @@ class PostBopWindow(Adw.ApplicationWindow):
         account,
         channel_groups,
     ):
+        self.buffer_connected = True
         self.suppress_composer_save = True
 
         self._clear_channel_box()
@@ -575,6 +620,7 @@ class PostBopWindow(Adw.ApplicationWindow):
         self.destinations_loaded = True
         self.suppress_composer_save = False
 
+        self._update_destination_mode()
         self._update_drop_button_state()
 
     def _show_channel_error(
@@ -612,38 +658,25 @@ class PostBopWindow(Adw.ApplicationWindow):
 
 
     def _update_destination_mode(self):
+        if not self.buffer_connected:
+            self.destination_label.set_text( "Buffer Account" )
+            self.destination_stack.set_visible_child_name( "connect" )
+            return
+
         if self.current_action == "idea":
-            self.destination_label.set_text(
-                "Organization"
-            )
-
-            self.destination_stack.set_visible_child_name(
-                "organization"
-            )
-
+            self.destination_label.set_text( "Organization" )
+            self.destination_stack.set_visible_child_name( "organization" )
             if not self.is_submitting:
-                self.drop_button.set_label(
-                    "Drop Idea"
-                )
+                self.drop_button.set_label( "Drop Idea" )
 
         else:
-            self.destination_label.set_text(
-                "Channels"
-            )
-
-            self.destination_stack.set_visible_child_name(
-                "channels"
-            )
-
+            self.destination_label.set_text( "Channels" )
+            self.destination_stack.set_visible_child_name( "channels" )
             if not self.is_submitting:
                 if self.current_action == "draft":
-                    self.drop_button.set_label(
-                        "Drop to Draft"
-                    )
+                    self.drop_button.set_label( "Drop to Draft" )
                 else:
-                    self.drop_button.set_label(
-                        "Drop to Queue"
-                    )
+                    self.drop_button.set_label( "Drop to Queue" )
 
     def _get_selected_organization(
         self,
@@ -1416,5 +1449,154 @@ class PostBopWindow(Adw.ApplicationWindow):
             application.send_drop_success_notification( body )
 
     def show_settings(self):
-        dialog = PostBopSettingsDialog( preferences=self.preferences )
+        dialog = PostBopSettingsDialog( preferences=self.preferences, on_disconnect=self._on_buffer_disconnected )
         dialog.present(self)
+
+    def _show_disconnected_state(self):
+        self.buffer_connected = False
+        self.destinations_loaded = False
+
+        self.destination_label.set_text( "Buffer Account" )
+        self.destination_stack.set_visible_child_name( "connect" )
+
+        self.status_label.set_text( "No Buffer account connected." )
+        self.connect_button.set_sensitive( not self.auth_in_progress )
+
+        self._update_drop_button_state()
+
+    def _on_connect_clicked( self, _button ):
+        if self.auth_in_progress:
+            return
+
+        self.auth_in_progress = True
+
+        self.connect_button.set_sensitive( False )
+        self.connect_button.set_label( "Connecting..." )
+
+        self.status_label.set_text( "Preparing Buffer authorization..." )
+
+        code_verifier = generate_code_verifier()
+        code_challenge = generate_code_challenge( code_verifier )
+
+        state = generate_state()
+
+        authorization_url = build_authorization_url( code_challenge, state )
+
+        thread = threading.Thread(
+            target=self._prepare_oauth_worker,
+            args=( state, code_verifier, authorization_url ),
+            daemon=True,
+        )
+
+        thread.start()
+
+    def _prepare_oauth_worker( self, state: str, code_verifier: str, authorization_url: str ):
+        try:
+            create_oauth_session( hash_state(state) )
+        except Exception as exception:
+            logger.exception( "Unable to prepare Buffer authorization" )
+            GLib.idle_add( self._finish_oauth_error, str(exception) )
+            return
+
+        GLib.idle_add( self._open_oauth_browser, state, code_verifier, authorization_url )
+
+    def _open_oauth_browser( self, state: str, code_verifier: str, authorization_url: str ):
+        try:
+            Gio.AppInfo.launch_default_for_uri( authorization_url, None )
+        except GLib.Error as exception:
+            logger.exception( "Unable to open Buffer authorization" )
+            self._finish_oauth_error( str(exception) )
+            return False
+
+        self.status_label.set_text( "Complete authorization in your browser." )
+        thread = threading.Thread(
+            target=self._poll_oauth_result_worker,
+            args=( state, code_verifier ),
+            daemon=True,
+        )
+
+        thread.start()
+        return False
+
+    def _poll_oauth_result_worker( self, state: str, code_verifier: str ):
+        deadline = time.monotonic() + 180
+
+        while time.monotonic() < deadline:
+            try:
+                result = get_oauth_result( state )
+                authorization_code = result.get( "code" )
+                error = result.get( "error" )
+
+                if error:
+                    raise RuntimeError( str(error) )
+
+                if authorization_code:
+                    exchange_authorization_code( authorization_code, code_verifier )
+                    GLib.idle_add( self._finish_oauth_success )
+                    return
+
+            except Exception as exception:
+                logger.exception( "Buffer authorization failed" )
+                GLib.idle_add( self._finish_oauth_error, str(exception)  )
+                return
+
+            time.sleep(1)
+
+        GLib.idle_add( self._finish_oauth_error, "Buffer authorization timed out." )
+
+    def _finish_oauth_success(self):
+        self.auth_in_progress = False
+        self.buffer_connected = True
+
+        self.connect_button.set_label( "Connect Buffer" )
+        self.connect_button.set_sensitive(True)
+        self.status_label.set_text( "Connected to Buffer. Loading channels..." )
+
+        self._update_destination_mode()
+        self._load_channels()
+
+        return False
+
+    def _finish_oauth_error( self, message: str ):
+        self.auth_in_progress = False
+
+        self.connect_button.set_label( "Connect Buffer" )
+        self.connect_button.set_sensitive( True )
+        self.status_label.set_text( message )
+
+        return False
+
+    def _on_buffer_disconnected( self ):
+        self.buffer_connected = False
+        self.destinations_loaded = False
+
+        self._clear_retry_state()
+
+        self.organizations = []
+
+        self.organization_model.splice( 0, self.organization_model.get_n_items(), [] )
+        self.organization_dropdown.set_sensitive( False )
+
+        self.channel_buttons.clear()
+        self._clear_channel_box()
+
+        self.preferences[ "last_channel_ids" ] = []
+
+        self.preferences[ "last_idea_organization_id" ] = None
+
+        try:
+            save_preferences( self.preferences )
+        except OSError:
+            logger.exception( "Unable to save disconnected preferences" )
+
+        self.composer_state[ "channel_ids" ] = []
+        self.composer_state[ "organization_id" ] = None
+
+        text = self._get_composer_text()
+        if text.strip():
+            try:
+                save_composer_state( self.composer_state )
+            except OSError:
+                logger.exception( "Unable to update composer state after Buffer disconnect" )
+
+        self._show_disconnected_state()
