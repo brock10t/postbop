@@ -1,6 +1,8 @@
 import gi
 import logging
 import threading
+import math
+import time
 
 gi.require_version("Adw", "1")
 gi.require_version("Gtk", "4.0")
@@ -13,11 +15,18 @@ from .api.buffer_client import (
     create_queue_post,
     get_account,
     get_channels,
+    BufferRateLimitError,
 )
 
 from .storage.preferences import (
     load_preferences,
     save_preferences,
+)
+
+from .storage.composer_state import (
+    clear_composer_state,
+    load_composer_state,
+    save_composer_state,
 )
 
 logger = logging.getLogger("postbop.window")
@@ -40,9 +49,32 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         self.preferences = load_preferences()
 
-        self.current_action = (
-            self.preferences["last_action"]
+        self.composer_state = load_composer_state()
+
+        self.has_unfinished_composer = bool(
+            self.composer_state["text"].strip()
         )
+
+        self.composer_save_source_id = None
+        self.suppress_composer_save = False
+        self.destinations_loaded = False
+
+        if self.has_unfinished_composer:
+            self.current_action = (
+                self.composer_state["action"]
+            )
+        else:
+            self.current_action = (
+                self.preferences["last_action"]
+            )
+
+        self.retry_action = None
+        self.retry_text = None
+        self.retry_destinations = []
+        self.retry_all_destinations = []
+
+        self.retry_available_at = None
+        self.retry_timer_source_id = None
 
         self.set_title("PostBop")
         self.set_default_size(500, 520)
@@ -87,9 +119,14 @@ class PostBopWindow(Adw.ApplicationWindow):
         self.composer.set_left_margin(8)
         self.composer.set_right_margin(8)
 
+        if self.has_unfinished_composer:
+            self.composer.get_buffer().set_text(
+                self.composer_state["text"]
+            )
+
         self.composer.get_buffer().connect(
             "changed",
-            self._update_drop_button_state,
+            self._on_composer_changed,
         )
 
         composer_scroll = Gtk.ScrolledWindow()
@@ -212,6 +249,55 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         root.append(self.status_label)
 
+        self.error_revealer = Gtk.Revealer()
+        self.error_revealer.set_reveal_child(
+            False
+        )
+
+        error_box = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=6,
+        )
+
+        self.error_label = Gtk.Label(
+            label="",
+            xalign=0,
+        )
+
+        self.error_label.set_wrap(True)
+        self.error_label.add_css_class(
+            "error"
+        )
+
+        error_box.append(
+            self.error_label
+        )
+
+        self.retry_button = Gtk.Button(
+            label="Retry Failed"
+        )
+
+        self.retry_button.set_halign(
+            Gtk.Align.START
+        )
+
+        self.retry_button.connect(
+            "clicked",
+            self._on_retry_clicked,
+        )
+
+        error_box.append(
+            self.retry_button
+        )
+
+        self.error_revealer.set_child(
+            error_box
+        )
+
+        root.append(
+            self.error_revealer
+        )
+
         self.drop_button = Gtk.Button(
             label="Drop to Queue"
         )
@@ -233,6 +319,11 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         self.set_content(
             toolbar_view
+        )
+
+        self.connect(
+            "close-request",
+            self._on_close_request,
         )
 
         self._update_destination_mode()
@@ -299,6 +390,8 @@ class PostBopWindow(Adw.ApplicationWindow):
         account,
         channel_groups,
     ):
+        self.suppress_composer_save = True
+
         self._clear_channel_box()
 
         self.organizations = account.get(
@@ -323,11 +416,18 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         self.channel_buttons.clear()
 
-        saved_organization_id = (
-            self.preferences[
-                "last_idea_organization_id"
-            ]
-        )
+        if self.has_unfinished_composer:
+            saved_organization_id = (
+                self.composer_state[
+                    "organization_id"
+                ]
+            )
+        else:
+            saved_organization_id = (
+                self.preferences[
+                    "last_idea_organization_id"
+                ]
+            )
 
         selected_organization = 0
 
@@ -348,11 +448,18 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         self.channel_buttons.clear()
 
-        saved_channel_ids = set(
-            self.preferences[
-                "last_channel_ids"
-            ]
-        )
+        if self.has_unfinished_composer:
+            saved_channel_ids = set(
+                self.composer_state[
+                    "channel_ids"
+                ]
+            )
+        else:
+            saved_channel_ids = set(
+                self.preferences[
+                    "last_channel_ids"
+                ]
+            )
 
         if not channel_groups:
             label = Gtk.Label(
@@ -363,12 +470,6 @@ class PostBopWindow(Adw.ApplicationWindow):
             self.channel_box.append(label)
 
             return
-
-        saved_channel_ids = set(
-            self.preferences[
-                "last_channel_ids"
-            ]
-        )
 
         channel_count = 0
 
@@ -431,7 +532,7 @@ class PostBopWindow(Adw.ApplicationWindow):
 
                 button.connect(
                     "toggled",
-                    self._update_drop_button_state,
+                    self._on_channel_toggled,
                 )
 
                 if unavailable_reason:
@@ -460,6 +561,9 @@ class PostBopWindow(Adw.ApplicationWindow):
             f"{'channel' if channel_count == 1 else 'channels'} "
             "available."
         )
+
+        self.destinations_loaded = True
+        self.suppress_composer_save = False
 
         self._update_drop_button_state()
 
@@ -494,6 +598,7 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         self._update_destination_mode()
         self._update_drop_button_state()
+        self._schedule_composer_state_save()
 
 
     def _update_destination_mode(self):
@@ -549,6 +654,7 @@ class PostBopWindow(Adw.ApplicationWindow):
         _parameter,
     ):
         self._update_drop_button_state()
+        self._schedule_composer_state_save()
 
     def _get_composer_text(self) -> str:
         buffer = self.composer.get_buffer()
@@ -604,6 +710,7 @@ class PostBopWindow(Adw.ApplicationWindow):
             has_text
             and has_destination
             and not self.is_submitting
+            and self.retry_action is None
         )
 
     def _set_submitting(self, submitting: bool):
@@ -708,11 +815,17 @@ class PostBopWindow(Adw.ApplicationWindow):
         action: str,
         text: str,
         destinations: list[dict],
+        all_destinations: list[dict] | None = None,
     ):
         successes = []
         failures = []
 
-        for destination in destinations:
+        if all_destinations is None:
+            all_destinations = destinations
+
+        for index, destination in enumerate(
+            destinations
+        ):
             try:
                 if action == "idea":
                     result = create_idea(
@@ -743,6 +856,40 @@ class PostBopWindow(Adw.ApplicationWindow):
                     destination["id"],
                 )
 
+            except BufferRateLimitError as exception:
+                logger.warning(
+                    "Buffer rate limit reached"
+                )
+
+                failures.append({
+                    "destination": destination,
+                    "error": str(exception),
+                    "retry_after": (
+                        exception.retry_after
+                    ),
+                    "rate_limited": True,
+                })
+
+                # Don't hammer Buffer with the
+                # remaining destinations.
+                for remaining in destinations[
+                    index + 1:
+                ]:
+                    failures.append({
+                        "destination": remaining,
+                        "error": (
+                            "Not attempted because "
+                            "Buffer's rate limit "
+                            "was reached."
+                        ),
+                        "retry_after": (
+                            exception.retry_after
+                        ),
+                        "rate_limited": True,
+                    })
+
+                break
+
             except Exception as exception:
                 logger.exception(
                     "Unable to complete Buffer %s action for %s",
@@ -753,12 +900,15 @@ class PostBopWindow(Adw.ApplicationWindow):
                 failures.append({
                     "destination": destination,
                     "error": str(exception),
+                    "retry_after": None,
+                    "rate_limited": False,
                 })
 
         GLib.idle_add(
             self._finish_drop,
             action,
-            destinations,
+            text,
+            all_destinations,
             successes,
             failures,
         )
@@ -766,6 +916,7 @@ class PostBopWindow(Adw.ApplicationWindow):
     def _finish_drop(
         self,
         action: str,
+        text: str,
         destinations: list[dict],
         successes: list[dict],
         failures: list[dict],
@@ -778,27 +929,27 @@ class PostBopWindow(Adw.ApplicationWindow):
         )
 
         if failures:
-            failed_names = ", ".join(
-                failure[
-                    "destination"
-                ]["name"]
-                for failure in failures
+            self._set_retry_state(
+                action,
+                text,
+                destinations,
+                failures,
             )
 
             if successes:
                 self.status_label.set_text(
                     f"Completed {len(successes)} "
-                    f"of {total}. "
-                    f"Failed: {failed_names}"
+                    f"of {total} destinations."
                 )
             else:
                 self.status_label.set_text(
-                    f"Unable to complete action. "
-                    f"Failed: {failed_names}"
+                    "Buffer could not complete "
+                    "the action."
                 )
 
-            # Preserve the composer and selections.
             return
+
+        self._clear_retry_state()
 
         self._remember_successful_action(
             action,
@@ -807,7 +958,20 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         buffer = self.composer.get_buffer()
 
+        self.suppress_composer_save = True
         buffer.set_text("")
+        self.suppress_composer_save = False
+
+        clear_composer_state()
+
+        self.composer_state = {
+            "text": "",
+            "action": "queue",
+            "channel_ids": [],
+            "organization_id": None,
+        }
+
+        self.has_unfinished_composer = False
 
         if action == "idea":
             self.status_label.set_text(
@@ -860,3 +1024,348 @@ class PostBopWindow(Adw.ApplicationWindow):
             logger.exception(
                 "Unable to save PostBop preferences"
             )
+
+    def _on_composer_changed(
+        self,
+        _buffer,
+    ):
+        if (
+            not self.suppress_composer_save
+            and self.retry_action is not None
+        ):
+            self._clear_retry_state()
+            
+        self._update_drop_button_state()
+        self._schedule_composer_state_save()
+
+
+    def _on_channel_toggled(
+        self,
+        _button,
+    ):
+        self._update_drop_button_state()
+        self._schedule_composer_state_save()
+
+    def _schedule_composer_state_save(
+        self,
+    ):
+        if self.suppress_composer_save:
+            return
+
+        if self.composer_save_source_id is not None:
+            GLib.source_remove(
+                self.composer_save_source_id
+            )
+
+        self.composer_save_source_id = (
+            GLib.timeout_add(
+                500,
+                self._save_composer_state,
+            )
+        )
+
+
+    def _save_composer_state(self):
+        self.composer_save_source_id = None
+
+        text = self._get_composer_text()
+
+        if not text.strip():
+            clear_composer_state()
+
+            self.has_unfinished_composer = False
+
+            return False
+
+        if self.destinations_loaded:
+            channel_ids = [
+                channel["id"]
+                for channel
+                in self._get_selected_channels()
+            ]
+
+            organization = (
+                self._get_selected_organization()
+            )
+
+            organization_id = (
+                organization["id"]
+                if organization is not None
+                else None
+            )
+
+        else:
+            # Preserve recovered destinations until
+            # Buffer data has finished loading.
+            channel_ids = (
+                self.composer_state[
+                    "channel_ids"
+                ]
+            )
+
+            organization_id = (
+                self.composer_state[
+                    "organization_id"
+                ]
+            )
+
+        state = {
+            "text": text,
+            "action": self.current_action,
+            "channel_ids": channel_ids,
+            "organization_id": organization_id,
+        }
+
+        try:
+            save_composer_state(state)
+
+            self.composer_state = state
+            self.has_unfinished_composer = True
+
+        except OSError:
+            logger.exception(
+                "Unable to save unfinished composer"
+            )
+
+        return False
+
+    def _on_close_request(
+        self,
+        _window,
+    ):
+        if self.composer_save_source_id is not None:
+            GLib.source_remove(
+                self.composer_save_source_id
+            )
+
+            self.composer_save_source_id = None
+
+        self._save_composer_state()
+
+        return False
+
+    def _set_retry_state(
+        self,
+        action: str,
+        text: str,
+        all_destinations: list[dict],
+        failures: list[dict],
+    ):
+        self.retry_action = action
+        self.retry_text = text
+        self.retry_all_destinations = (
+            all_destinations
+        )
+
+        self.retry_destinations = [
+            failure["destination"]
+            for failure in failures
+        ]
+
+        lines = []
+
+        for failure in failures:
+            name = failure[
+                "destination"
+            ]["name"]
+
+            lines.append(
+                f"{name}: "
+                f"{failure['error']}"
+            )
+
+        self.error_label.set_text(
+            "\n".join(lines)
+        )
+
+        retry_delays = [
+            failure["retry_after"]
+            for failure in failures
+            if failure.get(
+                "retry_after"
+            ) is not None
+        ]
+
+        if retry_delays:
+            retry_after = max(
+                retry_delays
+            )
+
+            self.retry_available_at = (
+                time.monotonic()
+                + retry_after
+            )
+        else:
+            self.retry_available_at = None
+
+        self.error_revealer.set_reveal_child(
+            True
+        )
+
+        self._start_retry_timer()
+        self._update_drop_button_state()
+
+
+    def _clear_retry_state(self):
+        self.retry_action = None
+        self.retry_text = None
+        self.retry_destinations = []
+        self.retry_all_destinations = []
+        self.retry_available_at = None
+
+        if self.retry_timer_source_id is not None:
+            GLib.source_remove(
+                self.retry_timer_source_id
+            )
+
+            self.retry_timer_source_id = None
+
+        self.error_revealer.set_reveal_child(
+            False
+        )
+
+        self.retry_button.set_label(
+            "Retry Failed"
+        )
+
+
+    def _start_retry_timer(self):
+        if self.retry_timer_source_id is not None:
+            GLib.source_remove(
+                self.retry_timer_source_id
+            )
+
+            self.retry_timer_source_id = None
+
+        if self.retry_available_at is None:
+            self.retry_button.set_label(
+                "Retry Failed"
+            )
+
+            self.retry_button.set_sensitive(
+                not self.is_submitting
+            )
+
+            return
+
+        self.retry_timer_source_id = (
+            GLib.timeout_add_seconds(
+                1,
+                self._update_retry_button,
+            )
+        )
+
+        self._update_retry_button()
+
+
+    def _update_retry_button(self):
+        if self.retry_action is None:
+            self.retry_timer_source_id = None
+
+            return False
+
+        if self.is_submitting:
+            self.retry_button.set_sensitive(
+                False
+            )
+
+            return True
+
+        if self.retry_available_at is None:
+            self.retry_button.set_label(
+                "Retry Failed"
+            )
+
+            self.retry_button.set_sensitive(
+                True
+            )
+
+            self.retry_timer_source_id = None
+
+            return False
+
+        remaining = math.ceil(
+            self.retry_available_at
+            - time.monotonic()
+        )
+
+        if remaining <= 0:
+            self.retry_available_at = None
+
+            self.retry_button.set_label(
+                "Retry Failed"
+            )
+
+            self.retry_button.set_sensitive(
+                True
+            )
+
+            self.retry_timer_source_id = None
+
+            return False
+
+        minutes, seconds = divmod(
+            remaining,
+            60,
+        )
+
+        if minutes:
+            label = (
+                f"Retry in {minutes}m "
+                f"{seconds}s"
+            )
+        else:
+            label = (
+                f"Retry in {seconds}s"
+            )
+
+        self.retry_button.set_label(label)
+
+        self.retry_button.set_sensitive(
+            False
+        )
+
+        return True
+
+    def _on_retry_clicked(
+        self,
+        _button,
+    ):
+        if (
+            self.retry_action is None
+            or not self.retry_destinations
+        ):
+            return
+
+        if self.retry_available_at is not None:
+            return
+
+        action = self.retry_action
+        text = self.retry_text
+
+        retry_destinations = (
+            self.retry_destinations.copy()
+        )
+
+        all_destinations = (
+            self.retry_all_destinations.copy()
+        )
+
+        self.status_label.set_text(
+            "Retrying failed destinations..."
+        )
+
+        self._set_submitting(True)
+
+        thread = threading.Thread(
+            target=self._drop_posts_worker,
+            args=(
+                action,
+                text,
+                retry_destinations,
+                all_destinations,
+            ),
+            daemon=True,
+        )
+
+        thread.start()
