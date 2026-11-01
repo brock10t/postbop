@@ -9,6 +9,29 @@ from postbop.storage.credentials import load_access_token
 class BufferApiError(RuntimeError):
     pass
 
+class BufferRateLimitError(BufferApiError):
+    def __init__(
+        self,
+        retry_after: int | None = None,
+        window: str | None = None,
+    ):
+        
+        self.retry_after = retry_after
+        self.window = window
+
+        if retry_after is not None:
+            message = (
+                "Buffer rate limit reached. "
+                f"Retry in {retry_after} seconds."
+            )
+        else:
+            message = (
+                "Buffer rate limit reached. "
+                "Please try again later."
+            )
+
+        super().__init__(message)
+
 def _graphql_request(
     query: str,
     variables: dict | None = None,
@@ -41,6 +64,59 @@ def _graphql_request(
             result = json.load(response)
 
     except HTTPError as exception:
+        if exception.code == 429:
+            retry_after = None
+            window = None
+
+            retry_after_header = (
+                exception.headers.get(
+                    "Retry-After"
+                )
+            )
+
+            if retry_after_header:
+                try:
+                    retry_after = int(
+                        retry_after_header
+                    )
+                except ValueError:
+                    pass
+
+            try:
+                error_result = json.load(
+                    exception
+                )
+            except Exception:
+                error_result = {}
+
+            errors = error_result.get(
+                "errors",
+                [],
+            )
+
+            if errors:
+                first_error = errors[0]
+
+                if isinstance(
+                    first_error,
+                    dict,
+                ):
+                    extensions = (
+                        first_error.get(
+                            "extensions",
+                            {},
+                        )
+                    )
+
+                    window = extensions.get(
+                        "window"
+                    )
+
+            raise BufferRateLimitError(
+                retry_after=retry_after,
+                window=window,
+            ) from exception
+
         if exception.code == 401 and allow_refresh:
             refresh_tokens()
 
@@ -67,6 +143,32 @@ def _graphql_request(
     errors = result.get("errors")
 
     if errors:
+        rate_limited_error = next(
+            (
+                error
+                for error in errors
+                if (
+                    isinstance(error, dict)
+                    and error.get(
+                        "extensions",
+                        {},
+                    ).get("code")
+                    == "RATE_LIMIT_EXCEEDED"
+                )
+            ),
+            None,
+        )
+
+        if rate_limited_error is not None:
+            window = rate_limited_error.get(
+                "extensions",
+                {},
+            ).get("window")
+
+            raise BufferRateLimitError(
+                window=window,
+            )
+
         unauthorized = any(
             error.get("extensions", {}).get("code")
             == "UNAUTHORIZED"
