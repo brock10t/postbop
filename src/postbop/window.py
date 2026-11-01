@@ -991,6 +991,19 @@ class PostBopWindow(Adw.ApplicationWindow):
                 f"{'channel' if len(successes) == 1 else 'channels'}."
             )
 
+        self._notify_success(
+            action,
+            len(successes),
+        )
+
+        if not self.preferences[ "keep_open_after_success" ]:
+            application = self.get_application()
+
+            if application is not None:
+                application.remain_alive_for_notification( 5 )
+            self.close()
+            return
+
         self.composer.grab_focus()
 
     def _remember_successful_action(
@@ -1369,3 +1382,31 @@ class PostBopWindow(Adw.ApplicationWindow):
         )
 
         thread.start()
+
+    def _notify_success(
+        self,
+        action: str,
+        count: int,
+    ):
+        if action == "idea":
+            body = "Idea dropped to Buffer."
+
+        elif action == "draft":
+            body = (
+                f"Dropped to Draft for "
+                f"{count} Buffer "
+                f"{'channel' if count == 1 else 'channels'}."
+            )
+
+        else:
+            body = (
+                f"Dropped to {count} Buffer "
+                f"{'channel' if count == 1 else 'channels'}."
+            )
+
+        application = self.get_application()
+
+        if application is not None:
+            application.send_drop_success_notification(
+                body
+            )

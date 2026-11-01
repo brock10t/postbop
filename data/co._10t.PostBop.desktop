@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=PostBop
+Comment=Quickly send content into a Buffer publishing workflow
+Exec=postbop
+Terminal=false
+Type=Application
+Categories=Network;Utility;
+StartupNotify=true
+DBusActivatable=true
+X-GNOME-UsesNotifications=true

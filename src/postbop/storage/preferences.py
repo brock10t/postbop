@@ -15,6 +15,7 @@ DEFAULT_PREFERENCES = {
     "last_action": "queue",
     "last_channel_ids": [],
     "last_idea_organization_id": None,
+    "keep_open_after_success": False,
 }
 
 def get_preferences_path() -> Path:
@@ -98,6 +99,18 @@ def load_preferences() -> dict:
         preferences[
             "last_idea_organization_id"
         ] = organization_id
+
+    keep_open_after_success = saved.get(
+        "keep_open_after_success"
+    )
+
+    if isinstance(
+        keep_open_after_success,
+        bool,
+    ):
+        preferences[
+            "keep_open_after_success"
+        ] = keep_open_after_success
 
     return preferences
 
