@@ -15,16 +15,11 @@ class PostBopApplication(Adw.Application):
     def __init__(self):
         configure_logging()
 
-        super().__init__(
-            application_id="co._10t.PostBop"
-        )
-
+        super().__init__( application_id="co._10t.PostBop", flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE )
         GLib.set_application_name("PostBop")
 
         if not Notify.init("PostBop"):
-            logger.warning(
-                "Unable to initialize desktop notifications"
-            )
+            logger.warning( "Unable to initialize desktop notifications" )
 
         logger.info("PostBop application initialized")
 
@@ -52,13 +47,20 @@ class PostBopApplication(Adw.Application):
         settings_action.connect( "activate", self._on_settings )
         self.add_action( settings_action )
 
+        drop_action = Gio.SimpleAction.new( "drop", None )
+        drop_action.connect( "activate", self._on_drop )
+        self.add_action( drop_action )
+
+        self.set_accels_for_action( "app.drop", [ "<Primary>Return", "<Primary>KP_Enter" ] )
+        self.set_accels_for_action( "app.settings", [ "<Primary>comma" ], )
+
     def _on_open_buffer( self, _action, _parameter ):
         try:
             Gio.AppInfo.launch_default_for_uri( "https://publish.buffer.com/", None )
         except GLib.Error:
             logger.exception( "Unable to open Buffer" )
 
-    def _on_settings( self, _action, _parameter, ):
+    def _on_settings( self, _action, _parameter ):
         window = self.get_active_window()
         if window is None:
             return
@@ -82,3 +84,22 @@ class PostBopApplication(Adw.Application):
     def _release_notification_hold( self ) -> bool:
         self.release()
         return False
+
+    def do_command_line( self, command_line ):
+        arguments = command_line.get_arguments()
+
+        incoming_text = " ".join( arguments[1:] ).strip()
+
+        self.activate()
+        window = self.get_active_window()
+
+        if window is not None and incoming_text:
+            window.handle_incoming_text( incoming_text )
+
+        return 0
+
+    def _on_drop( self, _action, _parameter ):
+        window = self.get_active_window()
+        if window is None:
+            return
+        window.drop_current_post()
