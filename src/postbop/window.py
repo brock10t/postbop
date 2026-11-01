@@ -1491,3 +1491,8 @@ class PostBopWindow(Adw.ApplicationWindow):
         end = buffer.get_end_iter()
         buffer.place_cursor( end )
         self.composer.grab_focus()
+
+    def drop_current_post(self):
+        if not self.drop_button.get_sensitive():
+            return
+        self._on_drop_clicked( self.drop_button )
