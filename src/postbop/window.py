@@ -9,45 +9,21 @@ gi.require_version("Gtk", "4.0")
 
 from gi.repository import Adw, Gio, GLib, Gtk
 
-from .api.buffer_client import (
-    create_draft_post,
-    create_idea,
-    create_queue_post,
-    get_account,
-    get_channels,
-    BufferRateLimitError,
-)
+from .api.buffer_client import ( create_draft_post, create_idea, create_queue_post,
+                                get_account, get_channels, BufferRateLimitError )
 
 from .api.buffer_auth import exchange_authorization_code
 
-from .api.companion import (
-    create_oauth_session,
-    get_oauth_result,
-)
+from .api.companion import ( create_oauth_session, get_oauth_result )
 
-from .api.oauth import (
-    build_authorization_url,
-    generate_code_challenge,
-    generate_code_verifier,
-    generate_state,
-    hash_state,
-)
+from .api.oauth import ( build_authorization_url, generate_code_challenge, generate_code_verifier,
+                            generate_state, hash_state )
 
-from .storage.credentials import (
-    load_access_token,
-    load_refresh_token,
-)
+from .storage.credentials import ( load_access_token, load_refresh_token )
 
-from .storage.preferences import (
-    load_preferences,
-    save_preferences,
-)
+from .storage.preferences import ( load_preferences, save_preferences )
 
-from .storage.composer_state import (
-    clear_composer_state,
-    load_composer_state,
-    save_composer_state,
-)
+from .storage.composer_state import ( clear_composer_state, load_composer_state, save_composer_state )
 
 from .settings import PostBopSettingsDialog
 
@@ -57,7 +33,7 @@ class PostBopWindow(Adw.ApplicationWindow):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
-        logger.debug("Initializing PostBop window")
+        logger.debug( "Initializing PostBop window" )
 
         self.channel_buttons = {}
         self.is_submitting = False
@@ -67,32 +43,22 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         self.buffer_connected = bool( load_access_token() and load_refresh_token() )
 
-        self.action_keys = [
-            "queue",
-            "draft",
-            "idea",
-        ]
+        self.action_keys = [ "queue", "draft", "idea", ]
 
         self.preferences = load_preferences()
 
         self.composer_state = load_composer_state()
 
-        self.has_unfinished_composer = bool(
-            self.composer_state["text"].strip()
-        )
+        self.has_unfinished_composer = bool( self.composer_state["text"].strip() )
 
         self.composer_save_source_id = None
         self.suppress_composer_save = False
         self.destinations_loaded = False
 
         if self.has_unfinished_composer:
-            self.current_action = (
-                self.composer_state["action"]
-            )
+            self.current_action = ( self.composer_state["action"] )
         else:
-            self.current_action = (
-                self.preferences["last_action"]
-            )
+            self.current_action = ( self.preferences["last_action"] )
 
         self.retry_action = None
         self.retry_text = None
@@ -102,8 +68,8 @@ class PostBopWindow(Adw.ApplicationWindow):
         self.retry_available_at = None
         self.retry_timer_source_id = None
 
-        self.set_title("PostBop")
-        self.set_default_size(500, 520)
+        self.set_title( "PostBop" )
+        self.set_default_size( 500, 520 )
 
         self._build_ui()
         if self.buffer_connected:
@@ -128,98 +94,61 @@ class PostBopWindow(Adw.ApplicationWindow):
         header_bar.pack_end( menu_button )
         toolbar_view.add_top_bar( header_bar )
 
-        root = Gtk.Box(
-            orientation=Gtk.Orientation.VERTICAL,
-            spacing=12,
-        )
+        root = Gtk.Box( orientation=Gtk.Orientation.VERTICAL, spacing=12 )
 
-        root.set_margin_top(18)
-        root.set_margin_bottom(18)
-        root.set_margin_start(18)
-        root.set_margin_end(18)
+        root.set_margin_top( 18 )
+        root.set_margin_bottom( 18 )
+        root.set_margin_start( 18 )
+        root.set_margin_end( 18 )
 
-        composer_label = Gtk.Label(
-            label="Post",
-            xalign=0,
-        )
-        composer_label.add_css_class("heading")
+        composer_label = Gtk.Label( label="Post", xalign=0 )
+        composer_label.add_css_class( "heading" )
 
-        root.append(composer_label)
+        root.append( composer_label )
 
         self.composer = Gtk.TextView()
-        self.composer.set_wrap_mode(
-            Gtk.WrapMode.WORD_CHAR
-        )
+        self.composer.set_wrap_mode( Gtk.WrapMode.WORD_CHAR )
 
-        self.composer.set_top_margin(8)
-        self.composer.set_bottom_margin(8)
-        self.composer.set_left_margin(8)
-        self.composer.set_right_margin(8)
+        self.composer.set_top_margin( 8 )
+        self.composer.set_bottom_margin( 8 )
+        self.composer.set_left_margin( 8 )
+        self.composer.set_right_margin( 8 )
 
         if self.has_unfinished_composer:
-            self.composer.get_buffer().set_text(
-                self.composer_state["text"]
-            )
+            self.composer.get_buffer().set_text( self.composer_state["text"] )
 
-        self.composer.get_buffer().connect(
-            "changed",
-            self._on_composer_changed,
-        )
+        self.composer.get_buffer().connect( "changed", self._on_composer_changed )
 
         composer_scroll = Gtk.ScrolledWindow()
-        composer_scroll.set_min_content_height(150)
-        composer_scroll.set_vexpand(True)
-        composer_scroll.set_child(self.composer)
+        composer_scroll.set_min_content_height( 150 )
+        composer_scroll.set_vexpand( True )
+        composer_scroll.set_child( self.composer )
 
-        root.append(composer_scroll)
+        root.append( composer_scroll )
 
-        action_label = Gtk.Label(
-            label="Action",
-            xalign=0,
-        )
-        action_label.add_css_class("heading")
+        action_label = Gtk.Label( label="Action", xalign=0 )
+        action_label.add_css_class( "heading" )
 
-        root.append(action_label)
+        root.append( action_label )
 
-        self.action_dropdown = Gtk.DropDown.new_from_strings([
-            "Drop to Queue",
-            "Drop to Draft",
-            "Drop Idea",
-        ])
+        self.action_dropdown = Gtk.DropDown.new_from_strings([ "Drop to Queue", "Drop to Draft", "Drop Idea" ])
+        self.action_dropdown.set_selected( self.action_keys.index( self.current_action ) )
+        self.action_dropdown.connect( "notify::selected", self._on_action_changed )
 
-        self.action_dropdown.set_selected(
-            self.action_keys.index(
-                self.current_action
-            )
-        )
+        root.append( self.action_dropdown )
 
-        self.action_dropdown.connect(
-            "notify::selected",
-            self._on_action_changed,
-        )
+        self.destination_label = Gtk.Label( label="Channels", xalign=0 )
 
-        root.append(self.action_dropdown)
+        self.destination_label.add_css_class( "heading" )
 
-        self.destination_label = Gtk.Label(
-            label="Channels",
-            xalign=0,
-        )
-
-        self.destination_label.add_css_class(
-            "heading"
-        )
-
-        root.append(
-            self.destination_label
-        )
+        root.append( self.destination_label )
 
         self.destination_stack = Gtk.Stack()
 
         self.connect_box = Gtk.Box( orientation=Gtk.Orientation.VERTICAL, spacing=8 )
 
         connect_label = Gtk.Label( label=(
-            "Connect PostBop to Buffer to choose "
-            "channels and start dropping posts."
+            "Connect PostBop to Buffer to choose  channels and start dropping posts."
         ), xalign=0 )
         connect_label.set_wrap( True )
         self.connect_box.append( connect_label )
@@ -232,153 +161,68 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         self.destination_stack.add_named( self.connect_box, "connect" )
 
-        self.channel_box = Gtk.Box(
-            orientation=Gtk.Orientation.VERTICAL,
-            spacing=6,
-        )
+        self.channel_box = Gtk.Box( orientation=Gtk.Orientation.VERTICAL, spacing=6 )
+        self.loading_label = Gtk.Label( label="Loading Buffer channels...", xalign=0 )
 
-        self.loading_label = Gtk.Label(
-            label="Loading Buffer channels...",
-            xalign=0,
-        )
-
-        self.channel_box.append(
-            self.loading_label
-        )
+        self.channel_box.append( self.loading_label )
 
         channel_scroll = Gtk.ScrolledWindow()
-        channel_scroll.set_min_content_height(140)
-        channel_scroll.set_child(
-            self.channel_box
-        )
+        channel_scroll.set_min_content_height( 140 )
+        channel_scroll.set_child( self.channel_box )
 
-        self.destination_stack.add_named(
-            channel_scroll,
-            "channels",
-        )
+        self.destination_stack.add_named( channel_scroll, "channels" )
 
         self.organization_model = Gtk.StringList()
+        self.organization_dropdown = Gtk.DropDown( model=self.organization_model )
+        self.organization_dropdown.set_sensitive( False )
 
-        self.organization_dropdown = Gtk.DropDown(
-            model=self.organization_model,
-        )
+        self.organization_dropdown.connect( "notify::selected", self._on_organization_changed )
+        organization_box = Gtk.Box( orientation=Gtk.Orientation.VERTICAL, spacing=6 )
 
-        self.organization_dropdown.set_sensitive(
-            False
-        )
+        organization_box.append( self.organization_dropdown )
 
-        self.organization_dropdown.connect(
-            "notify::selected",
-            self._on_organization_changed,
-        )
+        self.destination_stack.add_named( organization_box, "organization" )
+        self.destination_stack.set_visible_child_name( "channels" )
 
-        organization_box = Gtk.Box(
-            orientation=Gtk.Orientation.VERTICAL,
-            spacing=6,
-        )
+        root.append( self.destination_stack )
 
-        organization_box.append(
-            self.organization_dropdown
-        )
+        self.status_label = Gtk.Label( label="", xalign=0 )
+        self.status_label.set_wrap( True )
 
-        self.destination_stack.add_named(
-            organization_box,
-            "organization",
-        )
-
-        self.destination_stack.set_visible_child_name(
-            "channels"
-        )
-
-        root.append(
-            self.destination_stack
-        )
-
-        self.status_label = Gtk.Label(
-            label="",
-            xalign=0,
-        )
-
-        self.status_label.set_wrap(True)
-
-        root.append(self.status_label)
+        root.append( self.status_label )
 
         self.error_revealer = Gtk.Revealer()
-        self.error_revealer.set_reveal_child(
-            False
-        )
+        self.error_revealer.set_reveal_child( False )
 
-        error_box = Gtk.Box(
-            orientation=Gtk.Orientation.VERTICAL,
-            spacing=6,
-        )
+        error_box = Gtk.Box( orientation=Gtk.Orientation.VERTICAL, spacing=6 )
 
-        self.error_label = Gtk.Label(
-            label="",
-            xalign=0,
-        )
-
+        self.error_label = Gtk.Label( label="", xalign=0 )
         self.error_label.set_wrap(True)
-        self.error_label.add_css_class(
-            "error"
-        )
+        self.error_label.add_css_class( "error" )
 
-        error_box.append(
-            self.error_label
-        )
+        error_box.append( self.error_label )
 
-        self.retry_button = Gtk.Button(
-            label="Retry Failed"
-        )
+        self.retry_button = Gtk.Button( label="Retry Failed" )
+        self.retry_button.set_halign( Gtk.Align.START )
+        self.retry_button.connect( "clicked", self._on_retry_clicked )
 
-        self.retry_button.set_halign(
-            Gtk.Align.START
-        )
+        error_box.append( self.retry_button )
+        self.error_revealer.set_child( error_box )
 
-        self.retry_button.connect(
-            "clicked",
-            self._on_retry_clicked,
-        )
+        root.append( self.error_revealer )
 
-        error_box.append(
-            self.retry_button
-        )
+        self.drop_button = Gtk.Button( label="Drop to Queue" )
+        self.drop_button.add_css_class( "suggested-action" )
+        self.drop_button.connect( "clicked", self._on_drop_clicked )
+        self.drop_button.set_sensitive( False )
 
-        self.error_revealer.set_child(
-            error_box
-        )
+        root.append( self.drop_button )
 
-        root.append(
-            self.error_revealer
-        )
+        toolbar_view.set_content( root )
 
-        self.drop_button = Gtk.Button(
-            label="Drop to Queue"
-        )
+        self.set_content( toolbar_view )
 
-        self.drop_button.add_css_class(
-            "suggested-action"
-        )
-
-        self.drop_button.connect(
-            "clicked",
-            self._on_drop_clicked,
-        )
-        
-        self.drop_button.set_sensitive(False)
-
-        root.append(self.drop_button)
-
-        toolbar_view.set_content(root)
-
-        self.set_content(
-            toolbar_view
-        )
-
-        self.connect(
-            "close-request",
-            self._on_close_request,
-        )
+        self.connect( "close-request", self._on_close_request)
 
         self._update_destination_mode()
 
@@ -1600,3 +1444,50 @@ class PostBopWindow(Adw.ApplicationWindow):
                 logger.exception( "Unable to update composer state after Buffer disconnect" )
 
         self._show_disconnected_state()
+
+    def handle_incoming_text( self, incoming_text: str ):
+        if not incoming_text:
+            return
+
+        current_text = self._get_composer_text()
+
+        if not current_text.strip():
+            self._replace_composer_text( incoming_text )
+            return
+
+        dialog = Adw.AlertDialog.new(
+            "Composer Already Has Text",
+            ( "PostBop already contains unsent content.  Would you like to append the incoming text or replace the current composer?" ),
+        )
+
+        dialog.add_response( "cancel", "Cancel" )
+        dialog.add_response( "append", "Append" )
+        dialog.add_response( "replace", "Replace" )
+
+        dialog.set_default_response( "append" )
+        dialog.set_close_response( "cancel" )
+
+        dialog.set_response_appearance( "append", Adw.ResponseAppearance.SUGGESTED )
+        dialog.set_response_appearance( "replace", Adw.ResponseAppearance.DESTRUCTIVE )
+
+        dialog.connect( "response", self._on_incoming_text_response, incoming_text )
+
+        dialog.present(self)
+
+    def _on_incoming_text_response( self, _dialog, response: str, incoming_text: str ):
+        if response == "replace":
+            self._replace_composer_text( incoming_text )
+            return
+
+        if response == "append":
+            current_text = ( self._get_composer_text() )
+            combined_text = ( f"{current_text.rstrip()}\n\n{incoming_text.lstrip()}" )
+
+            self._replace_composer_text( combined_text )
+
+    def _replace_composer_text( self, text: str ):
+        buffer = self.composer.get_buffer()
+        buffer.set_text( text )
+        end = buffer.get_end_iter()
+        buffer.place_cursor( end )
+        self.composer.grab_focus()
