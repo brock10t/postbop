@@ -7,7 +7,7 @@ import time
 gi.require_version("Adw", "1")
 gi.require_version("Gtk", "4.0")
 
-from gi.repository import Adw, GLib, Gtk
+from gi.repository import Adw, Gio, GLib, Gtk
 
 from .api.buffer_client import (
     create_draft_post,
@@ -28,6 +28,8 @@ from .storage.composer_state import (
     load_composer_state,
     save_composer_state,
 )
+
+from .settings import PostBopSettingsDialog
 
 logger = logging.getLogger("postbop.window")
 
@@ -87,9 +89,17 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         header_bar = Adw.HeaderBar()
 
-        toolbar_view.add_top_bar(
-            header_bar
-        )
+        menu = Gio.Menu()
+        menu.append( "Open Buffer", "app.open-buffer" )
+        menu.append( "Settings", "app.settings" )
+
+        menu_button = Gtk.MenuButton()
+        menu_button.set_icon_name( "open-menu-symbolic" )
+        menu_button.set_tooltip_text( "Main Menu" )
+        menu_button.set_menu_model( menu )
+
+        header_bar.pack_end( menu_button )
+        toolbar_view.add_top_bar( header_bar )
 
         root = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL,
@@ -991,6 +1001,19 @@ class PostBopWindow(Adw.ApplicationWindow):
                 f"{'channel' if len(successes) == 1 else 'channels'}."
             )
 
+        self._notify_success(
+            action,
+            len(successes),
+        )
+
+        if not self.preferences[ "keep_open_after_success" ]:
+            application = self.get_application()
+
+            if application is not None:
+                application.remain_alive_for_notification( 5 )
+            self.close()
+            return
+
         self.composer.grab_focus()
 
     def _remember_successful_action(
@@ -1369,3 +1392,29 @@ class PostBopWindow(Adw.ApplicationWindow):
         )
 
         thread.start()
+
+    def _notify_success( self, action: str,  count: int ):
+        if action == "idea":
+            body = "Idea dropped to Buffer."
+
+        elif action == "draft":
+            body = (
+                f"Dropped to Draft for "
+                f"{count} Buffer "
+                f"{'channel' if count == 1 else 'channels'}."
+            )
+
+        else:
+            body = (
+                f"Dropped to {count} Buffer "
+                f"{'channel' if count == 1 else 'channels'}."
+            )
+
+        application = self.get_application()
+
+        if application is not None:
+            application.send_drop_success_notification( body )
+
+    def show_settings(self):
+        dialog = PostBopSettingsDialog( preferences=self.preferences )
+        dialog.present(self)
