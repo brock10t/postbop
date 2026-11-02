@@ -8,12 +8,8 @@ use RuntimeException;
 
 class Config
 {
-    public static function load(): void
-    {
-        $dotenv = Dotenv::createImmutable(
-            '/etc/postbop',
-            'companion.env'
-        );
+    public static function load(): void {
+        $dotenv = Dotenv::createImmutable( '/etc/postbop', 'companion.env' );
 
         $dotenv->load();
 
@@ -23,17 +19,17 @@ class Config
             'DB_USER',
             'DB_PASSWORD',
             'OAUTH_SESSION_TTL',
+            'MEDIA_STORAGE_PATH',
+            'MEDIA_PUBLIC_BASE_URL',
+            'MEDIA_RETENTION_DAYS',
+            'MEDIA_MAX_BYTES',
         ])->notEmpty();
     }
 
-    public static function get(string $key): string
-    {
-        if (!isset($_ENV[$key])) {
-            throw new RuntimeException(
-                "Missing required configuration value: {$key}"
-            );
+    public static function get( string $key ): string {
+        if ( !isset( $_ENV[$key] ) ) {
+            throw new RuntimeException( "Missing required configuration value: {$key}" );
         }
-
         return $_ENV[$key];
     }
 }

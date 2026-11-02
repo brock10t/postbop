@@ -7,30 +7,13 @@ use PDO;
 
 class OAuthSessionRepository
 {
-    public function __construct(
-        private PDO $connection
-    ) {
+    public function __construct( private PDO $connection ) {
     }
 
-    public function create(
-        string $stateHash,
-        int $ttlSeconds
-    ): void {
+    public function create( string $stateHash, int $ttlSeconds ): void {
         $statement = $this->connection->prepare(
-            '
-            INSERT INTO oauth_sessions (
-                state_hash,
-                expires_at
-            )
-            VALUES (
-                :state_hash,
-                TIMESTAMPADD(
-                    SECOND,
-                    :ttl_seconds,
-                    CURRENT_TIMESTAMP
-                )
-            )
-            '
+            'INSERT INTO oauth_sessions (state_hash,expires_at)
+            VALUES (:state_hash,TIMESTAMPADD(SECOND,:ttl_seconds,CURRENT_TIMESTAMP) )'
         );
 
         $statement->execute([
@@ -39,19 +22,14 @@ class OAuthSessionRepository
         ]);
     }
 
-    public function completeWithCode(
-        string $stateHash,
-        string $authorizationCode
-    ): bool {
+    public function completeWithCode( string $stateHash, string $authorizationCode ): bool {
         $statement = $this->connection->prepare(
-            '
-            UPDATE oauth_sessions
-            SET authorization_code = :authorization_code
-            WHERE state_hash = :state_hash
-            AND authorization_code IS NULL
-            AND oauth_error IS NULL
-            AND expires_at > CURRENT_TIMESTAMP
-            '
+            'UPDATE oauth_sessions
+                SET authorization_code = :authorization_code
+                WHERE state_hash = :state_hash
+                AND authorization_code IS NULL
+                AND oauth_error IS NULL
+                AND expires_at > CURRENT_TIMESTAMP'
         );
 
         $statement->execute([
@@ -62,19 +40,14 @@ class OAuthSessionRepository
         return $statement->rowCount() === 1;
     }
 
-    public function completeWithError(
-        string $stateHash,
-        string $oauthError
-    ): bool {
+    public function completeWithError( string $stateHash, string $oauthError ): bool {
         $statement = $this->connection->prepare(
-            '
-            UPDATE oauth_sessions
-            SET oauth_error = :oauth_error
-            WHERE state_hash = :state_hash
-            AND authorization_code IS NULL
-            AND oauth_error IS NULL
-            AND expires_at > CURRENT_TIMESTAMP
-            '
+            'UPDATE oauth_sessions
+                SET oauth_error = :oauth_error
+                WHERE state_hash = :state_hash
+                AND authorization_code IS NULL
+                AND oauth_error IS NULL
+                AND expires_at > CURRENT_TIMESTAMP'
         );
 
         $statement->execute([
@@ -85,22 +58,15 @@ class OAuthSessionRepository
         return $statement->rowCount() === 1;
     }
 
-    public function claimResult(string $stateHash): array
-    {
+    public function claimResult(string $stateHash): array {
         $this->connection->beginTransaction();
 
         try {
             $statement = $this->connection->prepare(
-                '
-                SELECT
-                    authorization_code,
-                    oauth_error,
-                    claimed_at,
-                    expires_at > CURRENT_TIMESTAMP AS active
-                FROM oauth_sessions
-                WHERE state_hash = :state_hash
-                FOR UPDATE
-                '
+                'SELECT id, authorization_code, oauth_error, claimed_at, expires_at > CURRENT_TIMESTAMP AS active
+                    FROM oauth_sessions
+                    WHERE state_hash = :state_hash
+                    FOR UPDATE'
             );
 
             $statement->execute([
@@ -111,60 +77,43 @@ class OAuthSessionRepository
 
             if (!$session) {
                 $this->connection->rollBack();
-
-                return [
-                    'status' => 'invalid',
-                ];
+                return [ 'status' => 'invalid' ];
             }
 
             if ($session['claimed_at'] !== null) {
                 $this->connection->rollBack();
-
-                return [
-                    'status' => 'claimed',
-                ];
+                return [ 'status' => 'claimed' ];
             }
 
             if ((int) $session['active'] !== 1) {
                 $this->connection->rollBack();
-
-                return [
-                    'status' => 'expired',
-                ];
+                return [ 'status' => 'expired' ];
             }
 
-            if (
-                $session['authorization_code'] === null &&
-                $session['oauth_error'] === null
-            ) {
+            if ( $session['authorization_code'] === null && $session['oauth_error'] === null ) {
                 $this->connection->rollBack();
-
-                return [
-                    'status' => 'pending',
-                ];
+                return [ 'status' => 'pending' ];
             }
 
             if ($session['authorization_code'] !== null) {
+                $mediaCredentials = new MediaCredentialRepository( $this->connection );
+                $mediaCredential = $mediaCredentials->issue( (int) $session['id'] );
                 $result = [
                     'status' => 'complete',
                     'code' => $session['authorization_code'],
+                    'media_token' => $mediaCredential['token'],
                 ];
             } else {
-                $result = [
-                    'status' => 'error',
-                    'error' => $session['oauth_error'],
-                ];
+                $result = [ 'status' => 'error', 'error' => $session['oauth_error'] ];
             }
 
             $statement = $this->connection->prepare(
-                '
-                UPDATE oauth_sessions
-                SET
-                    claimed_at = CURRENT_TIMESTAMP,
-                    authorization_code = NULL,
-                    oauth_error = NULL
-                WHERE state_hash = :state_hash
-                '
+                'UPDATE oauth_sessions
+                    SET
+                        claimed_at = CURRENT_TIMESTAMP,
+                        authorization_code = NULL,
+                        oauth_error = NULL
+                    WHERE state_hash = :state_hash'
             );
 
             $statement->execute([
