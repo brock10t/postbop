@@ -7,7 +7,7 @@ import time
 gi.require_version("Adw", "1")
 gi.require_version("Gtk", "4.0")
 
-from gi.repository import Adw, Gio, GLib, Gtk
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 
 from .api.buffer_client import ( create_draft_post, create_idea, create_queue_post,
                                 get_account, get_channels, BufferRateLimitError )
@@ -26,6 +26,8 @@ from .storage.preferences import ( load_preferences, save_preferences )
 from .storage.composer_state import ( clear_composer_state, load_composer_state, save_composer_state )
 
 from .settings import PostBopSettingsDialog
+
+from pathlib import Path
 
 logger = logging.getLogger("postbop.window")
 
@@ -70,6 +72,8 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         self.set_title( "PostBop" )
         self.set_default_size( 500, 520 )
+
+        self.selected_image_path: Path | None = None
 
         self._build_ui()
         if self.buffer_connected:
@@ -125,6 +129,45 @@ class PostBopWindow(Adw.ApplicationWindow):
         composer_scroll.set_child( self.composer )
 
         root.append( composer_scroll )
+
+        image_box = Gtk.Box( orientation=Gtk.Orientation.VERTICAL, spacing=8 )
+
+        self.attach_image_button = Gtk.Button( label="Attach Image" )
+        self.attach_image_button.set_halign( Gtk.Align.START )
+        self.attach_image_button.connect( "clicked", self._on_attach_image_clicked )
+
+        image_box.append( self.attach_image_button )
+
+        self.image_preview_box = Gtk.Box( orientation=Gtk.Orientation.HORIZONTAL, spacing=12 )
+        self.image_preview_box.set_visible( False )
+        self.image_preview = Gtk.Picture()
+        self.image_preview.set_size_request( 96, 96 )
+        self.image_preview.set_content_fit( Gtk.ContentFit.CONTAIN )
+        self.image_preview.set_can_shrink( True )
+
+        self.image_preview_box.append( self.image_preview )
+
+        image_details = Gtk.Box( orientation=Gtk.Orientation.VERTICAL, spacing=6 )
+        image_details.set_hexpand( True )
+        image_details.set_valign( Gtk.Align.CENTER )
+
+        self.image_filename_label = Gtk.Label( label="", xalign=0 )
+        self.image_filename_label.set_wrap( True )
+        self.image_filename_label.set_max_width_chars( 35 )
+
+        image_details.append( self.image_filename_label )
+
+        self.remove_image_button = Gtk.Button( label="Remove Image" )
+        self.remove_image_button.set_halign( Gtk.Align.START )
+        self.remove_image_button.connect( "clicked", self._on_remove_image_clicked )
+
+        image_details.append( self.remove_image_button )
+
+        self.image_preview_box.append( image_details )
+
+        image_box.append( self.image_preview_box )
+
+        root.append( image_box )
 
         action_label = Gtk.Label( label="Action", xalign=0 )
         action_label.add_css_class( "heading" )
@@ -598,6 +641,7 @@ class PostBopWindow(Adw.ApplicationWindow):
             and has_destination
             and not self.is_submitting
             and self.retry_action is None
+            and self.selected_image_path is None
         )
 
     def _set_submitting(self, submitting: bool):
@@ -1506,3 +1550,80 @@ class PostBopWindow(Adw.ApplicationWindow):
         if not self.drop_button.get_sensitive():
             return
         self._on_drop_clicked( self.drop_button )
+
+    def _on_attach_image_clicked( self, _button ):
+        dialog = Gtk.FileDialog()
+
+        dialog.set_title( "Select an Image" )
+
+        image_filter = Gtk.FileFilter()
+        image_filter.set_name( "Supported Images" )
+
+        image_filter.add_mime_type( "image/jpeg" )
+        image_filter.add_mime_type( "image/png" )
+        image_filter.add_mime_type( "image/webp" )
+
+        filters = Gio.ListStore.new( Gtk.FileFilter )
+
+        filters.append( image_filter )
+
+        dialog.set_filters( filters )
+
+        dialog.set_default_filter( image_filter )
+
+        dialog.open( self, None, self._on_image_file_selected )
+
+    def _on_image_file_selected( self, dialog, result ):
+        try:
+            file = dialog.open_finish( result )
+
+        except GLib.Error:
+            # User canceled the picker.
+            return
+
+        path = file.get_path()
+
+        if path is None:
+            self.status_label.set_text( "Please select a local image file." )
+            return
+
+        image_path = Path( path )
+
+        try:
+            byte_size = image_path.stat().st_size
+
+        except OSError:
+            self.status_label.set_text( "Unable to read the selected image." )
+            return
+
+        if byte_size > 10 * 1024 * 1024:
+            self.status_label.set_text( "The selected image exceeds the 10 MB limit." )
+            return
+
+        try:
+            texture = Gdk.Texture.new_from_file( file )
+
+        except GLib.Error:
+            self.status_label.set_text( "Unable to preview the selected image." )
+            return
+
+        self.selected_image_path = image_path
+
+        self.image_preview.set_paintable( texture )
+
+        self.image_filename_label.set_text( image_path.name )
+
+        self.image_preview_box.set_visible( True )
+
+        self.attach_image_button.set_label( "Change Image" )
+
+        self._update_drop_button_state()
+
+    def _on_remove_image_clicked( self, _button ):
+        self.selected_image_path = None
+        self.image_preview.set_paintable( None )
+        self.image_filename_label.set_text( "" )
+        self.image_preview_box.set_visible( False )
+        self.attach_image_button.set_label( "Attach Image" )
+
+        self._update_drop_button_state()
