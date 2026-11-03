@@ -254,10 +254,7 @@ def get_channels(organization_id: str) -> list[dict]:
 
     return data["channels"]
 
-def create_queue_post(
-    channel_id: str,
-    text: str,
-) -> dict:
+def create_queue_post( channel_id: str, text: str, image_url: str | None = None, ) -> dict:
     if not text.strip():
         raise ValueError(
             "Post text cannot be empty"
@@ -267,6 +264,7 @@ def create_queue_post(
     mutation CreateQueuePost(
         $text: String!
         $channelId: ChannelId!
+        $assets: [AssetInput!]!
     ) {
         createPost(
             input: {
@@ -274,6 +272,7 @@ def create_queue_post(
                 channelId: $channelId
                 schedulingType: automatic
                 mode: addToQueue
+                assets: $assets
             }
         ) {
             __typename
@@ -284,6 +283,10 @@ def create_queue_post(
                     text
                     dueAt
                     status
+                    assets {
+                        id
+                        mimeType
+                    }
                 }
             }
 
@@ -294,11 +297,21 @@ def create_queue_post(
     }
     """
 
+    assets = []
+
+    if image_url:
+        assets.append({
+            "image": {
+                "url": image_url,
+            }
+        })
+
     data = _graphql_request(
         query,
         {
             "text": text,
             "channelId": channel_id,
+            "assets": assets,
         },
     )
 
@@ -333,10 +346,7 @@ def create_queue_post(
 
     return post
 
-def create_draft_post(
-    channel_id: str,
-    text: str,
-) -> dict:
+def create_draft_post( channel_id: str, text: str, image_url: str | None = None ) -> dict:
     if not text.strip():
         raise ValueError(
             "Post text cannot be empty"
@@ -346,6 +356,7 @@ def create_draft_post(
     mutation CreateDraftPost(
         $text: String!
         $channelId: ChannelId!
+        $assets: [AssetInput!]!
     ) {
         createPost(
             input: {
@@ -354,6 +365,7 @@ def create_draft_post(
                 schedulingType: automatic
                 mode: addToQueue
                 saveToDraft: true
+                assets: $assets
             }
         ) {
             __typename
@@ -363,6 +375,10 @@ def create_draft_post(
                     id
                     text
                     status
+                    assets {
+                        id
+                        mimeType
+                    }
                 }
             }
 
@@ -373,11 +389,21 @@ def create_draft_post(
     }
     """
 
+    assets = []
+
+    if image_url:
+        assets.append({
+            "image": {
+                "url": image_url,
+            }
+        })
+
     data = _graphql_request(
         query,
         {
             "text": text,
             "channelId": channel_id,
+            "assets": assets,
         },
     )
 
