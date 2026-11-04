@@ -8,6 +8,7 @@ use PostBop\Companion\OAuthSessionRepository;
 use PostBop\Companion\MediaCredentialRepository;
 use PostBop\Companion\MediaStorage;
 use PostBop\Companion\MediaUploadRepository;
+use PostBop\Companion\BufferAccountVerifier;
 
 require dirname(__DIR__) . '/vendor/autoload.php';
 
@@ -270,6 +271,69 @@ try {
             'byte_size' => $storedFile['byte_size'],
         ]);
 
+        exit;
+    }
+
+    if ( $method === 'POST' && $path === '/media/activate' ) {
+        header('Content-Type: application/json');
+
+        $authorization = ( $_SERVER['HTTP_AUTHORIZATION'] ?? '' );
+
+        if ( !preg_match( '/^Bearer\s+(pbm_[a-f0-9]{64})$/i', $authorization, $matches ) ) {
+            http_response_code(401);
+            echo json_encode([ 'error' => 'invalid_media_credential', ]);
+            exit;
+        }
+
+        $mediaToken = $matches[1];
+
+        $body = json_decode( file_get_contents( 'php://input' ), true );
+
+        $bufferAccessToken = ( $body['buffer_access_token'] ?? null );
+
+        if (
+            !is_string($bufferAccessToken) ||
+            $bufferAccessToken === '' ||
+            strlen($bufferAccessToken) > 8192
+        ) {
+            http_response_code(400);
+            echo json_encode([ 'error' => 'invalid_buffer_token', ]);
+            exit;
+        }
+
+        $credentials = new MediaCredentialRepository( $database->connection() );
+
+        if (!$credentials->canActivate($mediaToken)) {
+            http_response_code(401);
+            echo json_encode([ 'error' => 'invalid_media_credential', ]);
+            exit;
+        }
+
+        $verifier = new BufferAccountVerifier();
+
+        try {
+            $accountId = $verifier->verify( $bufferAccessToken );
+
+        } catch (RuntimeException $exception) {
+            http_response_code(502);
+            echo json_encode([ 'error' => 'buffer_verification_unavailable', ]);
+            exit;
+        }
+
+        if ($accountId === null) {
+            http_response_code(401);
+            echo json_encode([ 'error' => 'invalid_buffer_token', ]);
+            exit;
+        }
+
+        if (!$credentials->activate( $mediaToken, $accountId )) {
+            http_response_code(401);
+            echo json_encode([ 'error' => 'media_activation_failed', ]);
+            exit;
+        }
+
+        http_response_code(200);
+        echo json_encode([ 'status' => 'activated', ]);
         exit;
     }
 

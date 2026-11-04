@@ -14,7 +14,7 @@ from .api.buffer_client import ( create_draft_post, create_idea, create_queue_po
 
 from .api.buffer_auth import exchange_authorization_code
 
-from .api.companion import ( create_oauth_session, get_oauth_result )
+from .api.companion import ( activate_media_credential, create_oauth_session, get_oauth_result )
 
 from .api.oauth import ( build_authorization_url, generate_code_challenge, generate_code_verifier,
                             generate_state, hash_state )
@@ -1423,7 +1423,8 @@ class PostBopWindow(Adw.ApplicationWindow):
                     if ( not isinstance(media_token, str) or not media_token ):
                         raise RuntimeError( "Companion did not return a media credential" )
                     try:
-                        exchange_authorization_code( authorization_code, code_verifier )
+                        tokens = exchange_authorization_code( authorization_code, code_verifier )
+                        activate_media_credential( media_token, tokens["access_token"] )
                         store_media_token( media_token )
                     except Exception:
                         clear_tokens()
