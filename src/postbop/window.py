@@ -11,13 +11,11 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 
 from .api.buffer_client import ( create_draft_post, create_idea, create_queue_post,
                                 get_account, get_channels, BufferRateLimitError )
-
 from .api.buffer_auth import exchange_authorization_code
-
 from .api.companion import ( activate_media_credential, create_oauth_session, get_oauth_result )
-
 from .api.oauth import ( build_authorization_url, generate_code_challenge, generate_code_verifier,
                             generate_state, hash_state )
+from .api.media_client import ( upload_image, MediaUploadError )
 
 from .storage.credentials import ( clear_tokens, load_access_token, load_refresh_token, store_media_token )
 from .storage.preferences import ( load_preferences, save_preferences )
@@ -74,6 +72,8 @@ class PostBopWindow(Adw.ApplicationWindow):
         self.retry_text = None
         self.retry_destinations = []
         self.retry_all_destinations = []
+        self.retry_image_path = None
+        self.retry_image_url = None
 
         self.retry_available_at = None
         self.retry_timer_source_id = None
@@ -503,6 +503,9 @@ class PostBopWindow(Adw.ApplicationWindow):
         text = self._get_composer_text()
 
         has_text = bool(text.strip())
+        has_image = ( self.selected_image_path is not None )
+
+        has_content = has_text or has_image
 
         if self.current_action == "idea":
             has_destination = ( self._get_selected_organization() is not None )
@@ -510,11 +513,14 @@ class PostBopWindow(Adw.ApplicationWindow):
             has_destination = bool( self._get_selected_channels() )
 
         self.drop_button.set_sensitive(
-            has_text
+            has_content
             and has_destination
             and not self.is_submitting
             and self.retry_action is None
-            and self.selected_image_path is None
+            and not (
+                self.current_action == "idea"
+                and has_image
+            )
         )
 
     def _set_submitting(self, submitting: bool):
@@ -523,6 +529,8 @@ class PostBopWindow(Adw.ApplicationWindow):
         self.composer.set_sensitive( not submitting )
 
         self.action_dropdown.set_sensitive( not submitting )
+        self.attach_image_button.set_sensitive( not submitting )
+        self.remove_image_button.set_sensitive( not submitting )
 
         self.organization_dropdown.set_sensitive( bool(self.organizations) and not submitting )
 
@@ -539,10 +547,18 @@ class PostBopWindow(Adw.ApplicationWindow):
     def _on_drop_clicked(self, _button):
         text = self._get_composer_text()
 
-        if not text.strip():
+        if self.is_submitting or self.retry_action is not None:
+            return
+
+        image_path = self.selected_image_path
+
+        if not text.strip() and image_path is None:
             return
 
         action = self.current_action
+
+        if action == "idea" and image_path is not None:
+            return
 
         if action == "idea":
             organization = ( self._get_selected_organization() )
@@ -577,27 +593,65 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         thread = threading.Thread(
             target=self._drop_posts_worker,
-            args=( action, text, destinations ),
+            args=( action, text, destinations, None, image_path, None ),
             daemon=True,
         )
 
         thread.start()
 
-    def _drop_posts_worker( self, action: str, text: str, destinations: list[dict], all_destinations: list[dict] | None = None ):
+    def _drop_posts_worker( self, action: str, text: str, destinations: list[dict], all_destinations: list[dict] | None = None, 
+                           image_path: Path | None = None, image_url: str | None = None ):
+        
         successes = []
         failures = []
 
         if all_destinations is None:
             all_destinations = destinations
 
+        if image_path is not None and image_url is None:
+            try:
+                hosted_image = upload_image( image_path )
+                image_url = hosted_image.url
+                logger.info( "Image uploaded successfully: media ID %s", hosted_image.media_id )
+            except Exception as exception:
+                logger.exception( "Unable to upload image before Drop" )
+
+                if isinstance(exception, MediaUploadError):
+                    message = str(exception)
+                else:
+                    message = ( "An unexpected error occurred while uploading the image." )
+
+                failures = [
+                    {
+                        "destination": destination,
+                        "error": message,
+                        "retry_after": None,
+                        "rate_limited": False,
+                    }
+                    for destination in destinations
+                ]
+
+                GLib.idle_add(
+                    self._finish_drop,
+                    action,
+                    text,
+                    all_destinations,
+                    [],
+                    failures,
+                    image_path,
+                    None,
+                )
+
+                return
+
         for index, destination in enumerate( destinations ):
             try:
                 if action == "idea":
                     result = create_idea( destination["id"], text )
                 elif action == "draft":
-                    result = create_draft_post( destination["id"], text )
+                    result = create_draft_post( destination["id"], text, image_url=image_url )
                 else:
-                    result = create_queue_post( destination["id"], text )
+                    result = create_queue_post( destination["id"], text, image_url=image_url )
 
                 successes.append({ "destination": destination, "result": result })
 
@@ -634,15 +688,17 @@ class PostBopWindow(Adw.ApplicationWindow):
                     "rate_limited": False,
                 })
 
-        GLib.idle_add( self._finish_drop, action, text, all_destinations, successes, failures )
+        GLib.idle_add( self._finish_drop, action, text, all_destinations, successes, failures, image_path, image_url )
 
-    def _finish_drop( self, action: str, text: str, destinations: list[dict], successes: list[dict], failures: list[dict] ):
+    def _finish_drop( self, action: str, text: str, destinations: list[dict], successes: list[dict], failures: list[dict], 
+                     image_path: Path | None = None, image_url: str | None = None ):
+        
         self._set_submitting(False)
 
         total = ( len(successes) + len(failures) )
 
         if failures:
-            self._set_retry_state( action, text, destinations, failures )
+            self._set_retry_state( action, text, destinations, failures, image_path, image_url )
 
             if successes:
                 self.status_label.set_text( f"Completed {len(successes)} of {total} destinations." )
@@ -815,9 +871,13 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         return False
 
-    def _set_retry_state( self, action: str, text: str, all_destinations: list[dict], failures: list[dict] ):
+    def _set_retry_state( self, action: str, text: str, all_destinations: list[dict], failures: list[dict], 
+                         image_path: Path | None = None, image_url: str | None = None ):
+        
         self.retry_action = action
         self.retry_text = text
+        self.retry_image_path = image_path
+        self.retry_image_url = image_url
         self.retry_all_destinations = ( all_destinations )
 
         self.retry_destinations = [ failure["destination"] for failure in failures ]
@@ -856,6 +916,8 @@ class PostBopWindow(Adw.ApplicationWindow):
         self.retry_destinations = []
         self.retry_all_destinations = []
         self.retry_available_at = None
+        self.retry_image_path = None
+        self.retry_image_url = None
 
         if self.retry_timer_source_id is not None:
             GLib.source_remove( self.retry_timer_source_id )
@@ -941,6 +1003,8 @@ class PostBopWindow(Adw.ApplicationWindow):
                 text,
                 retry_destinations,
                 all_destinations,
+                self.retry_image_path,
+                self.retry_image_url,
             ),
             daemon=True,
         )
@@ -1192,6 +1256,11 @@ class PostBopWindow(Adw.ApplicationWindow):
         dialog.open( self, None, self._on_image_file_selected )
 
     def _on_image_file_selected( self, dialog, result ):
+        if self.is_submitting:
+            return
+        if self.retry_action is not None:
+            self._clear_retry_state()
+
         try:
             file = dialog.open_finish( result )
 
@@ -1254,6 +1323,11 @@ class PostBopWindow(Adw.ApplicationWindow):
         self._schedule_composer_state_save()
 
     def _on_remove_image_clicked( self, _button ):
+        if self.is_submitting:
+            return
+        if self.retry_action is not None:
+            self._clear_retry_state()
+
         if self.selected_image_path is not None:
             try:
                 delete_cached_image( self.selected_image_path )

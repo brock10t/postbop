@@ -10,44 +10,25 @@ class BufferApiError(RuntimeError):
     pass
 
 class BufferRateLimitError(BufferApiError):
-    def __init__(
-        self,
-        retry_after: int | None = None,
-        window: str | None = None,
-    ):
+    def __init__( self, retry_after: int | None = None, window: str | None = None ):
         
         self.retry_after = retry_after
         self.window = window
 
         if retry_after is not None:
-            message = (
-                "Buffer rate limit reached. "
-                f"Retry in {retry_after} seconds."
-            )
+            message = ( "Buffer rate limit reached. Retry in {retry_after} seconds." )
         else:
-            message = (
-                "Buffer rate limit reached. "
-                "Please try again later."
-            )
+            message = ("Buffer rate limit reached. Please try again later." )
 
         super().__init__(message)
 
-def _graphql_request(
-    query: str,
-    variables: dict | None = None,
-    allow_refresh: bool = True,
-) -> dict:
+def _graphql_request( query: str, variables: dict | None = None, allow_refresh: bool = True ) -> dict:
     access_token = load_access_token()
 
     if access_token is None:
-        raise BufferApiError(
-            "No Buffer access token is stored"
-        )
+        raise BufferApiError( "No Buffer access token is stored" )
 
-    payload = json.dumps({
-        "query": query,
-        "variables": variables or {},
-    }).encode("utf-8")
+    payload = json.dumps({ "query": query, "variables": variables or {} }).encode("utf-8")
 
     request = Request(
         BUFFER_API_URL,
@@ -68,24 +49,16 @@ def _graphql_request(
             retry_after = None
             window = None
 
-            retry_after_header = (
-                exception.headers.get(
-                    "Retry-After"
-                )
-            )
+            retry_after_header = ( exception.headers.get( "Retry-After" ) )
 
             if retry_after_header:
                 try:
-                    retry_after = int(
-                        retry_after_header
-                    )
+                    retry_after = int( retry_after_header )
                 except ValueError:
                     pass
 
             try:
-                error_result = json.load(
-                    exception
-                )
+                error_result = json.load( exception )
             except Exception:
                 error_result = {}
 
@@ -97,20 +70,9 @@ def _graphql_request(
             if errors:
                 first_error = errors[0]
 
-                if isinstance(
-                    first_error,
-                    dict,
-                ):
-                    extensions = (
-                        first_error.get(
-                            "extensions",
-                            {},
-                        )
-                    )
-
-                    window = extensions.get(
-                        "window"
-                    )
+                if isinstance( first_error, dict ):
+                    extensions = ( first_error.get( "extensions", {} ) )
+                    window = extensions.get( "window" )
 
             raise BufferRateLimitError(
                 retry_after=retry_after,
@@ -120,25 +82,15 @@ def _graphql_request(
         if exception.code == 401 and allow_refresh:
             refresh_tokens()
 
-            return _graphql_request(
-                query,
-                variables,
-                allow_refresh=False,
-            )
+            return _graphql_request( query, variables, allow_refresh=False )
 
-        raise BufferApiError(
-            f"Buffer returned HTTP {exception.code}"
-        ) from exception
+        raise BufferApiError( f"Buffer returned HTTP {exception.code}" ) from exception
 
     except URLError as exception:
-        raise BufferApiError(
-            "Unable to reach the Buffer API"
-        ) from exception
+        raise BufferApiError( "Unable to reach the Buffer API" ) from exception
 
     if not isinstance(result, dict):
-        raise BufferApiError(
-            "Buffer returned an invalid API response"
-        )
+        raise BufferApiError( "Buffer returned an invalid API response" )
 
     errors = result.get("errors")
 
@@ -179,30 +131,21 @@ def _graphql_request(
         if unauthorized and allow_refresh:
             refresh_tokens()
 
-            return _graphql_request(
-                query,
-                variables,
-                allow_refresh=False,
-            )
+            return _graphql_request( query, variables, allow_refresh=False )
 
         message = "Buffer API request failed"
 
         first_error = errors[0]
 
         if isinstance(first_error, dict):
-            message = first_error.get(
-                "message",
-                message,
-            )
+            message = first_error.get( "message", message )
 
         raise BufferApiError(message)
 
     data = result.get("data")
 
     if not isinstance(data, dict):
-        raise BufferApiError(
-            "Buffer returned no API data"
-        )
+        raise BufferApiError( "Buffer returned no API data" )
 
     return data
 
@@ -245,20 +188,13 @@ def get_channels(organization_id: str) -> list[dict]:
     }
     """
 
-    data = _graphql_request(
-        query,
-        {
-            "organizationId": organization_id,
-        },
-    )
+    data = _graphql_request( query, { "organizationId": organization_id, } )
 
     return data["channels"]
 
 def create_queue_post( channel_id: str, text: str, image_url: str | None = None, ) -> dict:
-    if not text.strip():
-        raise ValueError(
-            "Post text cannot be empty"
-        )
+    if not text.strip() and not image_url:
+        raise ValueError( "A post must contain text or an image." )
 
     query = """
     mutation CreateQueuePost(
@@ -300,11 +236,7 @@ def create_queue_post( channel_id: str, text: str, image_url: str | None = None,
     assets = []
 
     if image_url:
-        assets.append({
-            "image": {
-                "url": image_url,
-            }
-        })
+        assets.append({ "image": { "url": image_url } })
 
     data = _graphql_request(
         query,
@@ -318,39 +250,28 @@ def create_queue_post( channel_id: str, text: str, image_url: str | None = None,
     result = data.get("createPost")
 
     if not isinstance(result, dict):
-        raise BufferApiError(
-            "Buffer returned an invalid post response"
-        )
+        raise BufferApiError( "Buffer returned an invalid post response" )
 
     result_type = result.get("__typename")
 
     if result_type == "MutationError":
         raise BufferApiError(
-            result.get(
-                "message",
-                "Buffer could not create the post",
-            )
+            result.get( "message", "Buffer could not create the post", )
         )
 
     if result_type != "PostActionSuccess":
-        raise BufferApiError(
-            "Buffer returned an unexpected post result"
-        )
+        raise BufferApiError( "Buffer returned an unexpected post result" )
 
     post = result.get("post")
 
     if not isinstance(post, dict):
-        raise BufferApiError(
-            "Buffer did not return the created post"
-        )
+        raise BufferApiError( "Buffer did not return the created post" )
 
     return post
 
 def create_draft_post( channel_id: str, text: str, image_url: str | None = None ) -> dict:
-    if not text.strip():
-        raise ValueError(
-            "Post text cannot be empty"
-        )
+    if not text.strip() and not image_url:
+        raise ValueError( "A post must contain text or an image." )
 
     query = """
     mutation CreateDraftPost(
@@ -392,11 +313,7 @@ def create_draft_post( channel_id: str, text: str, image_url: str | None = None 
     assets = []
 
     if image_url:
-        assets.append({
-            "image": {
-                "url": image_url,
-            }
-        })
+        assets.append({ "image": { "url": image_url } })
 
     data = _graphql_request(
         query,
@@ -410,42 +327,26 @@ def create_draft_post( channel_id: str, text: str, image_url: str | None = None 
     result = data.get("createPost")
 
     if not isinstance(result, dict):
-        raise BufferApiError(
-            "Buffer returned an invalid draft response"
-        )
+        raise BufferApiError( "Buffer returned an invalid draft response" )
 
     result_type = result.get("__typename")
 
     if result_type == "MutationError":
-        raise BufferApiError(
-            result.get(
-                "message",
-                "Buffer could not create the draft",
-            )
-        )
+        raise BufferApiError( result.get( "message", "Buffer could not create the draft" ) )
 
     if result_type != "PostActionSuccess":
-        raise BufferApiError(
-            "Buffer returned an unexpected draft result"
-        )
+        raise BufferApiError( "Buffer returned an unexpected draft result" )
 
     post = result.get("post")
 
     if not isinstance(post, dict):
-        raise BufferApiError(
-            "Buffer did not return the created draft"
-        )
+        raise BufferApiError( "Buffer did not return the created draft" )
 
     return post
 
-def create_idea(
-    organization_id: str,
-    text: str,
-) -> dict:
+def create_idea( organization_id: str, text: str ) -> dict:
     if not text.strip():
-        raise ValueError(
-            "Idea text cannot be empty"
-        )
+        raise ValueError( "Idea text cannot be empty" )
 
     query = """
     mutation CreateIdea(
@@ -489,26 +390,14 @@ def create_idea(
     result = data.get("createIdea")
 
     if not isinstance(result, dict):
-        raise BufferApiError(
-            "Buffer returned an invalid idea response"
-        )
+        raise BufferApiError( "Buffer returned an invalid idea response" )
 
     result_type = result.get("__typename")
 
     if result_type == "MutationError":
-        raise BufferApiError(
-            result.get(
-                "message",
-                "Buffer could not create the idea",
-            )
-        )
+        raise BufferApiError( result.get( "message", "Buffer could not create the idea" ) )
 
     if result_type != "Idea":
-        raise BufferApiError(
-            result.get(
-                "message",
-                "Buffer returned an unexpected idea result",
-            )
-        )
+        raise BufferApiError( result.get( "message", "Buffer returned an unexpected idea result" ) )
 
     return result
