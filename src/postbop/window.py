@@ -817,47 +817,68 @@ class PostBopWindow(Adw.ApplicationWindow):
         self.composer_save_source_id = ( GLib.timeout_add( 500, self._save_composer_state ) )
 
     def _save_composer_state(self):
+        # Called by the GLib debounce timer.
         self.composer_save_source_id = None
+        self._persist_composer_state()
+        return False # Don't repeat the timer.
 
+
+    def _save_composer_state_now(self) -> bool:
+        # Cancel any pending debounced save because we're about to persist the current state immediately.
+        if self.composer_save_source_id is not None:
+            GLib.source_remove( self.composer_save_source_id )
+            self.composer_save_source_id = None
+
+        return self._persist_composer_state()
+
+
+    def _persist_composer_state(self) -> bool:
         text = self._get_composer_text()
-        has_text = bool(text.strip())
 
-        has_image = ( self.selected_image_path is not None )
+        has_text = bool(text.strip())
+        has_image = self.selected_image_path is not None
 
         if not has_text and not has_image:
-            clear_composer_state()
+            try:
+                clear_composer_state()
+            except OSError:
+                logger.exception( "Unable to clear unfinished composer" )
+                return False
+
             self.has_unfinished_composer = False
-            return False
+            self.composer_state["image"] = None
+
+            return True
 
         if self.destinations_loaded:
             channel_ids = [
                 channel["id"]
-                for channel
-                in self._get_selected_channels()
+                for channel in self._get_selected_channels()
             ]
 
-            organization = (
-                self._get_selected_organization()
-            )
+            organization = self._get_selected_organization()
 
             organization_id = (
                 organization["id"]
                 if organization is not None
                 else None
             )
-        else:
-            # Preserve recovered destinations until
-            # Buffer data has finished loading.
-            channel_ids = ( self.composer_state[ "channel_ids" ] )
 
-            organization_id = ( self.composer_state[ "organization_id" ] )
+        else:
+            # Preserve recovered destinations until Buffer data has finished loading.
+            channel_ids = self.composer_state["channel_ids"]
+
+            organization_id = ( self.composer_state["organization_id"] )
 
         image_state = None
 
         if self.selected_image_path is not None:
             image_state = {
-                "cached_filename": ( self.selected_image_path.name ),
-                "original_filename": ( self.selected_image_original_filename or self.selected_image_path.name),
+                "cached_filename": self.selected_image_path.name,
+                "original_filename": (
+                    self.selected_image_original_filename
+                    or self.selected_image_path.name
+                ),
             }
 
         state = {
@@ -870,13 +891,14 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         try:
             save_composer_state(state)
-
-            self.composer_state = state
-            self.has_unfinished_composer = True
         except OSError:
             logger.exception( "Unable to save unfinished composer" )
+            return False
 
-        return False
+        self.composer_state = state
+        self.has_unfinished_composer = True
+
+        return True
 
     def _on_close_request( self, _window ):
         if self.composer_save_source_id is not None:
@@ -1286,27 +1308,41 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         self._attach_image_from_path( Path(path) )
 
-    def _on_remove_image_clicked( self, _button ):
+    def _on_remove_image_clicked(self, _button):
         if self.is_submitting:
             return
+
+        previous_image = self.selected_image_path
+        previous_filename = ( self.selected_image_original_filename )
+
+        if previous_image is None:
+            return
+
+        # Temporarily remove the attachment from the in-memory composer state.
+        self.selected_image_path = None
+        self.selected_image_original_filename = None
+
+        if not self._save_composer_state_now():
+            self.selected_image_path = previous_image
+            self.selected_image_original_filename = ( previous_filename )
+            self.status_label.set_text( "Unable to save the attachment removal. Your image was preserved." )
+            return
+
         if self.retry_action is not None:
             self._clear_retry_state()
 
-        if self.selected_image_path is not None:
-            try:
-                delete_cached_image( self.selected_image_path )
-            except ( OSError, ValueError ):
-                logger.exception( "Unable to remove cached image" )
-                
-        self.selected_image_path = None
-        self.selected_image_original_filename = None
-        self.image_preview.set_paintable( None )
-        self.image_filename_label.set_text( "" )
-        self.image_preview_box.set_visible( False )
+        try:
+            delete_cached_image(previous_image)
+        except (OSError, ValueError):
+            logger.exception( "Unable to remove cached image" )
+
+        self.image_preview.set_paintable(None)
+        self.image_filename_label.set_text("")
+        self.image_preview_box.set_visible(False)
+
         self.attach_image_button.set_label( "Attach Image" )
 
         self._update_drop_button_state()
-        self._schedule_composer_state_save()
 
     def _restore_cached_image( self ):
         image_state = self.composer_state.get( "image" )
@@ -1347,7 +1383,7 @@ class PostBopWindow(Adw.ApplicationWindow):
             return False
 
         try:
-            cached_path = cache_image( image_path )
+            cached_path = cache_image(image_path)
         except (OSError, ValueError) as exception:
             logger.warning( "Unable to attach image: %s", exception )
             self.status_label.set_text( str(exception) )
@@ -1356,34 +1392,57 @@ class PostBopWindow(Adw.ApplicationWindow):
         file = Gio.File.new_for_path( str(cached_path) )
 
         try:
-            texture = Gdk.Texture.new_from_file( file )
-
+            texture = Gdk.Texture.new_from_file(file)
         except GLib.Error:
             logger.exception( "Unable to preview cached image" )
-            delete_cached_image( cached_path )
+
+            try:
+                delete_cached_image(cached_path)
+            except (OSError, ValueError):
+                logger.exception( "Unable to clean up invalid cached image" )
+
             self.status_label.set_text( "Unable to preview the selected image." )
+
             return False
 
         previous_image = self.selected_image_path
 
-        if self.retry_action is not None:
-            self._clear_retry_state()
+        previous_filename = ( self.selected_image_original_filename)
 
         self.selected_image_path = cached_path
         self.selected_image_original_filename = ( image_path.name )
-        self.image_preview.set_paintable( texture )
+
+        if not self._save_composer_state_now():
+            # Saving failed. Restore the previous selection and leave its cached file untouched.
+            self.selected_image_path = previous_image
+            self.selected_image_original_filename = ( previous_filename )
+
+            try:
+                delete_cached_image(cached_path)
+            except (OSError, ValueError):
+                logger.exception( "Unable to clean up unsaved image" )
+
+            self.status_label.set_text( "Unable to save the image attachment. Your previous attachment was preserved." )
+
+            return False
+
+        if self.retry_action is not None:
+            self._clear_retry_state()
+
+        self.image_preview.set_paintable(texture)
         self.image_filename_label.set_text( image_path.name )
-        self.image_preview_box.set_visible( True )
+        self.image_preview_box.set_visible(True)
 
         self.attach_image_button.set_label( "Change Image" )
+
         self.status_label.set_text( "Image attached." )
 
         self._update_drop_button_state()
-        self._schedule_composer_state_save()
 
+        # Only delete the previous cached image after the new image state has been saved.
         if previous_image is not None:
             try:
-                delete_cached_image( previous_image )
+                delete_cached_image(previous_image)
             except (OSError, ValueError):
                 logger.exception( "Unable to remove previous cached image" )
 
