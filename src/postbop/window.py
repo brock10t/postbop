@@ -22,6 +22,8 @@ from .storage.preferences import ( load_preferences, save_preferences )
 from .storage.composer_state import ( clear_composer_state, load_composer_state, save_composer_state )
 from .storage.media_cache import ( cache_image, delete_cached_image, get_cached_image )
 
+from .validation import ( check_selected_channels )
+
 from .settings import PostBopSettingsDialog
 
 from pathlib import Path
@@ -139,6 +141,12 @@ class PostBopWindow(Adw.ApplicationWindow):
         composer_scroll.set_child( self.composer )
 
         root.append( composer_scroll )
+
+        self.character_status_label = Gtk.Label( label="", xalign=0 )
+        self.character_status_label.set_wrap( True )
+        self.character_status_label.add_css_class( "dim-label" )
+
+        root.append( self.character_status_label )
 
         image_box = Gtk.Box( orientation=Gtk.Orientation.VERTICAL, spacing=8 )
 
@@ -525,14 +533,54 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         if self.current_action == "idea":
             has_destination = ( self._get_selected_organization() is not None )
+            character_checks = []
         else:
-            has_destination = bool( self._get_selected_channels() )
+            channels = self._get_selected_channels()
+            has_destination = bool(channels)
+            character_checks = check_selected_channels( text,   channels )
+
+        summaries = []
+
+        for check in character_checks:
+            label = ( f"{check.service.title()} ({check.channel_name})" )
+
+            if check.remaining is not None:
+                if check.remaining >= 0:
+                    remaining_text = ( f"{check.remaining:,} left" )
+                else:
+                    remaining_text = ( f"{abs(check.remaining):,} over" )
+
+                if not check.exact:
+                    remaining_text += " (estimate)"
+
+                summaries.append( f"{label}: {remaining_text}" )
+
+            elif check.note:
+                summaries.append( f"{label}: {check.note}" )
+
+        has_character_errors = any(
+            check.over_limit
+            for check in character_checks
+        )
+
+        if hasattr( self, "character_status_label" ):
+            if self.current_action == "idea":
+                self.character_status_label.set_visible( False )
+            else:
+                self.character_status_label.set_visible( bool(summaries) )
+                self.character_status_label.set_text( "\r\n".join(summaries) )
+
+                if has_character_errors:
+                    self.character_status_label.add_css_class( "error")
+                else:
+                    self.character_status_label.remove_css_class( "error" )
 
         self.drop_button.set_sensitive(
             has_content
             and has_destination
             and not self.is_submitting
             and self.retry_action is None
+            and not has_character_errors
             and not (
                 self.current_action == "idea"
                 and has_image
