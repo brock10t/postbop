@@ -148,6 +148,22 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         image_box.append( self.attach_image_button )
 
+        drop_zone = Gtk.Box( orientation=Gtk.Orientation.VERTICAL, spacing=6 )
+        drop_zone.set_size_request( -1, 64 )
+        drop_zone.add_css_class( "card" )
+        drop_zone.set_valign( Gtk.Align.CENTER )
+
+        drop_label = Gtk.Label( label="Drop an image here" )
+        drop_label.add_css_class( "dim-label" )
+
+        drop_zone.append( drop_label )
+
+        drop_target = Gtk.DropTarget.new( Gdk.FileList, Gdk.DragAction.COPY )
+        drop_target.connect( "drop", self._on_image_dropped, )
+        drop_zone.add_controller( drop_target )
+
+        image_box.append( drop_zone )
+
         self.image_preview_box = Gtk.Box( orientation=Gtk.Orientation.HORIZONTAL, spacing=12 )
         self.image_preview_box.set_visible( False )
         self.image_preview = Gtk.Picture()
@@ -1256,16 +1272,10 @@ class PostBopWindow(Adw.ApplicationWindow):
         dialog.open( self, None, self._on_image_file_selected )
 
     def _on_image_file_selected( self, dialog, result ):
-        if self.is_submitting:
-            return
-        if self.retry_action is not None:
-            self._clear_retry_state()
-
         try:
-            file = dialog.open_finish( result )
-
+            file = dialog.open_finish( result )            
         except GLib.Error:
-            # User canceled the picker.
+            # The user canceled the file picker.
             return
 
         path = file.get_path()
@@ -1274,53 +1284,7 @@ class PostBopWindow(Adw.ApplicationWindow):
             self.status_label.set_text( "Please select a local image file." )
             return
 
-        image_path = Path( path )
-
-        try:
-            byte_size = image_path.stat().st_size
-
-        except OSError:
-            self.status_label.set_text( "Unable to read the selected image." )
-            return
-
-        if byte_size > 10 * 1024 * 1024:
-            self.status_label.set_text( "The selected image exceeds the 10 MB limit." )
-            return
-
-        try:
-            texture = Gdk.Texture.new_from_file( file )
-
-        except GLib.Error:
-            self.status_label.set_text( "Unable to preview the selected image." )
-            return
-
-        try:
-            cached_path = cache_image( image_path )
-        except ( OSError, ValueError ) as exception:
-            logger.exception( "Unable to cache selected image" )
-            self.status_label.set_text( str(exception) )
-            return
-
-        previous_image = self.selected_image_path
-        self.selected_image_path = cached_path
-        self.selected_image_original_filename = image_path.name
-
-        self.image_preview.set_paintable( texture )
-
-        if previous_image is not None:
-            try:
-                delete_cached_image( previous_image )
-            except ( OSError, ValueError ):
-                logger.exception( "Unable to remove previous cached image" )
-
-        self.image_filename_label.set_text( image_path.name )
-
-        self.image_preview_box.set_visible( True )
-
-        self.attach_image_button.set_label( "Change Image" )
-
-        self._update_drop_button_state()
-        self._schedule_composer_state_save()
+        self._attach_image_from_path( Path(path) )
 
     def _on_remove_image_clicked( self, _button ):
         if self.is_submitting:
@@ -1377,3 +1341,77 @@ class PostBopWindow(Adw.ApplicationWindow):
         self._update_drop_button_state()
 
         logger.info( "Restored cached image attachment" )
+
+    def _attach_image_from_path( self, image_path: Path ) -> bool:
+        if self.is_submitting:
+            return False
+
+        try:
+            cached_path = cache_image( image_path )
+        except (OSError, ValueError) as exception:
+            logger.warning( "Unable to attach image: %s", exception )
+            self.status_label.set_text( str(exception) )
+            return False
+
+        file = Gio.File.new_for_path( str(cached_path) )
+
+        try:
+            texture = Gdk.Texture.new_from_file( file )
+
+        except GLib.Error:
+            logger.exception( "Unable to preview cached image" )
+            delete_cached_image( cached_path )
+            self.status_label.set_text( "Unable to preview the selected image." )
+            return False
+
+        previous_image = self.selected_image_path
+
+        if self.retry_action is not None:
+            self._clear_retry_state()
+
+        self.selected_image_path = cached_path
+        self.selected_image_original_filename = ( image_path.name )
+        self.image_preview.set_paintable( texture )
+        self.image_filename_label.set_text( image_path.name )
+        self.image_preview_box.set_visible( True )
+
+        self.attach_image_button.set_label( "Change Image" )
+        self.status_label.set_text( "Image attached." )
+
+        self._update_drop_button_state()
+        self._schedule_composer_state_save()
+
+        if previous_image is not None:
+            try:
+                delete_cached_image( previous_image )
+            except (OSError, ValueError):
+                logger.exception( "Unable to remove previous cached image" )
+
+        return True
+
+    def _on_image_dropped( self, _target, value, _x, _y ) -> bool:
+        if self.is_submitting:
+            return False
+
+        if not isinstance( value, Gdk.FileList ):
+            return False
+
+        files = value.get_files()
+
+        if not files:
+            return False
+
+        if len(files) != 1:
+            self.status_label.set_text( "Please drop only one image." )
+            return True
+
+        file = files[0]
+
+        path = file.get_path()
+
+        if path is None:
+            self.status_label.set_text( "Please drop a local image file." )
+
+            return True
+
+        return self._attach_image_from_path( Path(path) )
