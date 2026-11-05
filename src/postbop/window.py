@@ -568,12 +568,20 @@ class PostBopWindow(Adw.ApplicationWindow):
                 self.character_status_label.set_visible( False )
             else:
                 self.character_status_label.set_visible( bool(summaries) )
-                self.character_status_label.set_text( "\r\n".join(summaries) )
-
+               
                 if has_character_errors:
-                    self.character_status_label.add_css_class( "error")
+                    details = ", ".join(
+                        f"{check.channel_name} ({abs(check.remaining):,} over)"
+                        for check in character_checks
+                        if check.over_limit
+                    )
+
+                    self.character_status_label.set_text( f"Character limit exceeded: {details}")
+                    self.character_status_label.add_css_class("error")
+
                 else:
-                    self.character_status_label.remove_css_class( "error" )
+                    self.character_status_label.set_text( "\r\n".join(summaries) )
+                    self.character_status_label.remove_css_class("error")
 
         self.drop_button.set_sensitive(
             has_content
@@ -636,6 +644,23 @@ class PostBopWindow(Adw.ApplicationWindow):
             destinations = ( self._get_selected_channels() )
 
             if not destinations:
+                return
+
+        if action != "idea":
+            character_checks = check_selected_channels( text, destinations )
+            invalid_channels = [
+                check
+                for check in character_checks
+                if check.over_limit
+            ]
+
+            if invalid_channels:
+                details = ", ".join(
+                    ( f"{check.channel_name} ({abs(check.remaining):,} characters over)" )
+                    for check in invalid_channels
+                )
+                self.status_label.set_text( f"Post exceeds character limits: {details}" )
+                self._update_drop_button_state()
                 return
 
         destination_count = len( destinations )
