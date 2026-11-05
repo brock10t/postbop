@@ -7,25 +7,24 @@ import time
 gi.require_version("Adw", "1")
 gi.require_version("Gtk", "4.0")
 
-from gi.repository import Adw, Gio, GLib, Gtk
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 
 from .api.buffer_client import ( create_draft_post, create_idea, create_queue_post,
                                 get_account, get_channels, BufferRateLimitError )
-
 from .api.buffer_auth import exchange_authorization_code
-
-from .api.companion import ( create_oauth_session, get_oauth_result )
-
+from .api.companion import ( activate_media_credential, create_oauth_session, get_oauth_result )
 from .api.oauth import ( build_authorization_url, generate_code_challenge, generate_code_verifier,
                             generate_state, hash_state )
+from .api.media_client import ( upload_image, MediaUploadError )
 
 from .storage.credentials import ( clear_tokens, load_access_token, load_refresh_token, store_media_token )
-
 from .storage.preferences import ( load_preferences, save_preferences )
-
 from .storage.composer_state import ( clear_composer_state, load_composer_state, save_composer_state )
+from .storage.media_cache import ( cache_image, delete_cached_image, get_cached_image )
 
 from .settings import PostBopSettingsDialog
+
+from pathlib import Path
 
 logger = logging.getLogger("postbop.window")
 
@@ -49,7 +48,16 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         self.composer_state = load_composer_state()
 
-        self.has_unfinished_composer = bool( self.composer_state["text"].strip() )
+        saved_image = self.composer_state.get( "image" )
+        cached_image_path = None
+
+        if saved_image is not None:
+            cached_image_path = get_cached_image( saved_image["cached_filename"] )
+
+        self.has_unfinished_composer = bool(
+            self.composer_state["text"].strip()
+            or cached_image_path is not None
+        )
 
         self.composer_save_source_id = None
         self.suppress_composer_save = False
@@ -64,6 +72,8 @@ class PostBopWindow(Adw.ApplicationWindow):
         self.retry_text = None
         self.retry_destinations = []
         self.retry_all_destinations = []
+        self.retry_image_path = None
+        self.retry_image_url = None
 
         self.retry_available_at = None
         self.retry_timer_source_id = None
@@ -71,7 +81,11 @@ class PostBopWindow(Adw.ApplicationWindow):
         self.set_title( "PostBop" )
         self.set_default_size( 500, 520 )
 
+        self.selected_image_path: Path | None = None
+        self.selected_image_original_filename: str | None = None
+
         self._build_ui()
+        self._restore_cached_image()
         if self.buffer_connected:
             self._load_channels()
         else:
@@ -125,6 +139,61 @@ class PostBopWindow(Adw.ApplicationWindow):
         composer_scroll.set_child( self.composer )
 
         root.append( composer_scroll )
+
+        image_box = Gtk.Box( orientation=Gtk.Orientation.VERTICAL, spacing=8 )
+
+        self.attach_image_button = Gtk.Button( label="Attach Image" )
+        self.attach_image_button.set_halign( Gtk.Align.START )
+        self.attach_image_button.connect( "clicked", self._on_attach_image_clicked )
+
+        image_box.append( self.attach_image_button )
+
+        drop_zone = Gtk.Box( orientation=Gtk.Orientation.VERTICAL, spacing=6 )
+        drop_zone.set_size_request( -1, 64 )
+        drop_zone.add_css_class( "card" )
+        drop_zone.set_valign( Gtk.Align.CENTER )
+
+        drop_label = Gtk.Label( label="Drop an image here" )
+        drop_label.add_css_class( "dim-label" )
+
+        drop_zone.append( drop_label )
+
+        drop_target = Gtk.DropTarget.new( Gdk.FileList, Gdk.DragAction.COPY )
+        drop_target.connect( "drop", self._on_image_dropped, )
+        drop_zone.add_controller( drop_target )
+
+        image_box.append( drop_zone )
+
+        self.image_preview_box = Gtk.Box( orientation=Gtk.Orientation.HORIZONTAL, spacing=12 )
+        self.image_preview_box.set_visible( False )
+        self.image_preview = Gtk.Picture()
+        self.image_preview.set_size_request( 96, 96 )
+        self.image_preview.set_content_fit( Gtk.ContentFit.CONTAIN )
+        self.image_preview.set_can_shrink( True )
+
+        self.image_preview_box.append( self.image_preview )
+
+        image_details = Gtk.Box( orientation=Gtk.Orientation.VERTICAL, spacing=6 )
+        image_details.set_hexpand( True )
+        image_details.set_valign( Gtk.Align.CENTER )
+
+        self.image_filename_label = Gtk.Label( label="", xalign=0 )
+        self.image_filename_label.set_wrap( True )
+        self.image_filename_label.set_max_width_chars( 35 )
+
+        image_details.append( self.image_filename_label )
+
+        self.remove_image_button = Gtk.Button( label="Remove Image" )
+        self.remove_image_button.set_halign( Gtk.Align.START )
+        self.remove_image_button.connect( "clicked", self._on_remove_image_clicked )
+
+        image_details.append( self.remove_image_button )
+
+        self.image_preview_box.append( image_details )
+
+        image_box.append( self.image_preview_box )
+
+        root.append( image_box )
 
         action_label = Gtk.Label( label="Action", xalign=0 )
         action_label.add_css_class( "heading" )
@@ -227,67 +296,37 @@ class PostBopWindow(Adw.ApplicationWindow):
         self._update_destination_mode()
 
     def _load_channels(self):
-        logger.debug(
-            "Starting Buffer channel load"
-        )
-
-        thread = threading.Thread(
-            target=self._load_channels_worker,
-            daemon=True,
-        )
-
+        logger.debug( "Starting Buffer channel load" )
+        thread = threading.Thread( target=self._load_channels_worker, daemon=True )
         thread.start()
 
     def _load_channels_worker(self):
         try:
             account = get_account()
-
             channel_groups = []
-
             for organization in account.get(
                 "organizations",
                 [],
             ):
-                channels = get_channels(
-                    organization["id"]
-                )
-
+                channels = get_channels( organization["id"] )
                 channel_groups.append({
                     "organization": organization,
                     "channels": channels,
                 })
 
-            GLib.idle_add(
-                self._populate_channels,
-                account,
-                channel_groups,
-            )
-
+            GLib.idle_add( self._populate_channels, account, channel_groups )
         except Exception as exception:
-            logger.exception(
-                "Unable to load Buffer channels"
-            )
-
-            GLib.idle_add(
-                self._show_channel_error,
-                str(exception),
-            )
+            logger.exception( "Unable to load Buffer channels" )
+            GLib.idle_add( self._show_channel_error, str(exception) )
 
     def _clear_channel_box(self):
         child = self.channel_box.get_first_child()
-
         while child is not None:
             next_child = child.get_next_sibling()
-
             self.channel_box.remove(child)
-
             child = next_child
 
-    def _populate_channels(
-        self,
-        account,
-        channel_groups,
-    ):
+    def _populate_channels( self, account, channel_groups ):
         self.buffer_connected = True
         self.suppress_composer_save = True
 
@@ -298,76 +337,40 @@ class PostBopWindow(Adw.ApplicationWindow):
             [],
         )
 
-        self.organization_model.splice(
-            0,
-            self.organization_model.get_n_items(),
-            [],
-        )
+        self.organization_model.splice( 0, self.organization_model.get_n_items(), [] )
 
         for organization in self.organizations:
-            self.organization_model.append(
-                organization["name"]
-            )
-
-        self.organization_dropdown.set_sensitive(
-            bool(self.organizations)
-        )
+            self.organization_model.append( organization["name"] )
+        
+        self.organization_dropdown.set_sensitive( bool(self.organizations) )
 
         self.channel_buttons.clear()
 
         if self.has_unfinished_composer:
-            saved_organization_id = (
-                self.composer_state[
-                    "organization_id"
-                ]
-            )
+            saved_organization_id = ( self.composer_state[ "organization_id" ] )
         else:
-            saved_organization_id = (
-                self.preferences[
-                    "last_idea_organization_id"
-                ]
-            )
+            saved_organization_id = ( self.preferences[ "last_idea_organization_id" ] )
 
         selected_organization = 0
 
-        for index, organization in enumerate(
-            self.organizations
-        ):
-            if (
-                organization["id"]
-                == saved_organization_id
-            ):
+        for index, organization in enumerate( self.organizations ):
+            if ( organization["id"] == saved_organization_id ):
                 selected_organization = index
                 break
 
         if self.organizations:
-            self.organization_dropdown.set_selected(
-                selected_organization
-            )
+            self.organization_dropdown.set_selected( selected_organization )
 
         self.channel_buttons.clear()
 
         if self.has_unfinished_composer:
-            saved_channel_ids = set(
-                self.composer_state[
-                    "channel_ids"
-                ]
-            )
+            saved_channel_ids = set( self.composer_state[ "channel_ids" ] )
         else:
-            saved_channel_ids = set(
-                self.preferences[
-                    "last_channel_ids"
-                ]
-            )
+            saved_channel_ids = set( self.preferences[ "last_channel_ids" ] )
 
         if not channel_groups:
-            label = Gtk.Label(
-                label="No Buffer organizations found.",
-                xalign=0,
-            )
-
+            label = Gtk.Label( label="No Buffer organizations found.", xalign=0)
             self.channel_box.append(label)
-
             return
 
         channel_count = 0
@@ -376,72 +379,38 @@ class PostBopWindow(Adw.ApplicationWindow):
             organization = group["organization"]
             channels = group["channels"]
 
-            organization_label = Gtk.Label(
-                label=organization["name"],
-                xalign=0,
-            )
+            organization_label = Gtk.Label( label=organization["name"], xalign=0 )
+            organization_label.add_css_class( "heading" )
 
-            organization_label.add_css_class(
-                "heading"
-            )
-
-            self.channel_box.append(
-                organization_label
-            )
+            self.channel_box.append( organization_label )
 
             for channel in channels:
-                display_name = (
-                    channel.get("displayName")
-                    or channel.get("name")
-                    or "Unnamed channel"
-                )
+                display_name = ( channel.get("displayName") or channel.get("name") or "Unnamed channel" )
 
-                service = channel.get(
-                    "service",
-                    "unknown",
-                )
+                service = channel.get( "service", "unknown" )
 
-                label = (
-                    f"{display_name} · "
-                    f"{service.title()}"
-                )
+                label = ( f"{display_name} · {service.title()}" )
 
                 unavailable_reason = None
 
                 if channel.get("isDisconnected"):
-                    unavailable_reason = (
-                        "Disconnected"
-                    )
+                    unavailable_reason = ( "Disconnected" )
                 elif channel.get("isLocked"):
                     unavailable_reason = "Locked"
 
                 if unavailable_reason:
-                    label += (
-                        f" ({unavailable_reason})"
-                    )
+                    label += ( f" ({unavailable_reason})" )
 
-                button = Gtk.CheckButton(
-                    label=label
-                )
-
-                button.set_active(
-                    channel["id"]
-                    in saved_channel_ids
-                )
-
-                button.connect(
-                    "toggled",
-                    self._on_channel_toggled,
-                )
+                button = Gtk.CheckButton( label=label )
+                button.set_active( channel["id"] in saved_channel_ids )
+                button.connect( "toggled", self._on_channel_toggled )
 
                 if unavailable_reason:
                     button.set_sensitive(False)
 
                 self.channel_box.append(button)
 
-                self.channel_buttons[
-                    channel["id"]
-                ] = {
+                self.channel_buttons[ channel["id"] ] = {
                     "button": button,
                     "channel": channel,
                     "organization": organization,
@@ -450,15 +419,10 @@ class PostBopWindow(Adw.ApplicationWindow):
 
                 channel_count += 1
 
-        logger.info(
-            "Loaded %d Buffer channels",
-            channel_count,
-        )
+        logger.info( "Loaded %d Buffer channels", channel_count )
 
         self.status_label.set_text(
-            f"{channel_count} Buffer "
-            f"{'channel' if channel_count == 1 else 'channels'} "
-            "available."
+            f"{channel_count} Buffer {'channel' if channel_count == 1 else 'channels'}  available."
         )
 
         self.destinations_loaded = True
@@ -467,34 +431,19 @@ class PostBopWindow(Adw.ApplicationWindow):
         self._update_destination_mode()
         self._update_drop_button_state()
 
-    def _show_channel_error(
-        self,
-        message: str,
-    ):
+    def _show_channel_error( self, message: str ):
         self._clear_channel_box()
-
-        label = Gtk.Label(
-            label="Unable to load Buffer channels.",
-            xalign=0,
-        )
-
+        label = Gtk.Label( label="Unable to load Buffer channels.", xalign=0 )
         self.channel_box.append(label)
-
         self.status_label.set_text(message)
 
-    def _on_action_changed(
-        self,
-        _dropdown,
-        _parameter,
-    ):
+    def _on_action_changed( self, _dropdown, _parameter ):
         selected = self.action_dropdown.get_selected()
 
         if selected >= len(self.action_keys):
             return
 
-        self.current_action = self.action_keys[
-            selected
-        ]
+        self.current_action = self.action_keys[ selected ]
 
         self._update_destination_mode()
         self._update_drop_button_state()
@@ -522,24 +471,16 @@ class PostBopWindow(Adw.ApplicationWindow):
                 else:
                     self.drop_button.set_label( "Drop to Queue" )
 
-    def _get_selected_organization(
-        self,
-    ) -> dict | None:
-        selected = (
-            self.organization_dropdown.get_selected()
-        )
-
+    def _get_selected_organization( self ) -> dict | None:
+        selected = ( self.organization_dropdown.get_selected() )
+        
         if selected >= len(self.organizations):
             return None
-
+        
         return self.organizations[selected]
 
 
-    def _on_organization_changed(
-        self,
-        _dropdown,
-        _parameter,
-    ):
+    def _on_organization_changed( self, _dropdown, _parameter ):
         self._update_drop_button_state()
         self._schedule_composer_state_save()
 
@@ -548,11 +489,7 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         start, end = buffer.get_bounds()
 
-        return buffer.get_text(
-            start,
-            end,
-            False,
-        )
+        return buffer.get_text( start, end, False )
 
     def _get_selected_channels(self) -> list[dict]:
         selected = []
@@ -582,50 +519,42 @@ class PostBopWindow(Adw.ApplicationWindow):
         text = self._get_composer_text()
 
         has_text = bool(text.strip())
+        has_image = ( self.selected_image_path is not None )
+
+        has_content = has_text or has_image
 
         if self.current_action == "idea":
-            has_destination = (
-                self._get_selected_organization()
-                is not None
-            )
+            has_destination = ( self._get_selected_organization() is not None )
         else:
-            has_destination = bool(
-                self._get_selected_channels()
-            )
+            has_destination = bool( self._get_selected_channels() )
 
         self.drop_button.set_sensitive(
-            has_text
+            has_content
             and has_destination
             and not self.is_submitting
             and self.retry_action is None
+            and not (
+                self.current_action == "idea"
+                and has_image
+            )
         )
 
     def _set_submitting(self, submitting: bool):
         self.is_submitting = submitting
 
-        self.composer.set_sensitive(
-            not submitting
-        )
+        self.composer.set_sensitive( not submitting )
 
-        self.action_dropdown.set_sensitive(
-            not submitting
-        )
+        self.action_dropdown.set_sensitive( not submitting )
+        self.attach_image_button.set_sensitive( not submitting )
+        self.remove_image_button.set_sensitive( not submitting )
 
-        self.organization_dropdown.set_sensitive(
-            bool(self.organizations)
-            and not submitting
-        )
+        self.organization_dropdown.set_sensitive( bool(self.organizations) and not submitting )
 
         for entry in self.channel_buttons.values():
-            entry["button"].set_sensitive(
-                entry["available"]
-                and not submitting
-            )
+            entry["button"].set_sensitive( entry["available"] and not submitting )
 
         if submitting:
-            self.drop_button.set_label(
-                "Dropping..."
-            )
+            self.drop_button.set_label( "Dropping..." )
         else:
             self._update_destination_mode()
 
@@ -634,156 +563,140 @@ class PostBopWindow(Adw.ApplicationWindow):
     def _on_drop_clicked(self, _button):
         text = self._get_composer_text()
 
-        if not text.strip():
+        if self.is_submitting or self.retry_action is not None:
+            return
+
+        image_path = self.selected_image_path
+
+        if not text.strip() and image_path is None:
             return
 
         action = self.current_action
 
+        if action == "idea" and image_path is not None:
+            return
+
         if action == "idea":
-            organization = (
-                self._get_selected_organization()
-            )
+            organization = ( self._get_selected_organization() )
 
             if organization is None:
                 return
 
-            destinations = [{
-                "id": organization["id"],
-                "name": organization["name"],
-            }]
+            destinations = [{ "id": organization["id"], "name": organization["name"], }]
 
         else:
-            destinations = (
-                self._get_selected_channels()
-            )
+            destinations = ( self._get_selected_channels() )
 
             if not destinations:
                 return
 
-        destination_count = len(
-            destinations
-        )
+        destination_count = len( destinations )
 
         if action == "idea":
-            self.status_label.set_text(
-                "Dropping Idea..."
-            )
+            self.status_label.set_text( "Dropping Idea..." )
 
         elif action == "draft":
             self.status_label.set_text(
-                f"Dropping to Draft for "
-                f"{destination_count} "
-                f"{'channel' if destination_count == 1 else 'channels'}..."
+                f"Dropping to Draft for {destination_count} {'channel' if destination_count == 1 else 'channels'}..."
             )
 
         else:
             self.status_label.set_text(
-                f"Dropping to "
-                f"{destination_count} "
-                f"{'channel' if destination_count == 1 else 'channels'}..."
+                f"Dropping to {destination_count} {'channel' if destination_count == 1 else 'channels'}..."
             )
 
         self._set_submitting(True)
 
         thread = threading.Thread(
             target=self._drop_posts_worker,
-            args=(
-                action,
-                text,
-                destinations,
-            ),
+            args=( action, text, destinations, None, image_path, None ),
             daemon=True,
         )
 
         thread.start()
 
-    def _drop_posts_worker(
-        self,
-        action: str,
-        text: str,
-        destinations: list[dict],
-        all_destinations: list[dict] | None = None,
-    ):
+    def _drop_posts_worker( self, action: str, text: str, destinations: list[dict], all_destinations: list[dict] | None = None, 
+                           image_path: Path | None = None, image_url: str | None = None ):
+        
         successes = []
         failures = []
 
         if all_destinations is None:
             all_destinations = destinations
 
-        for index, destination in enumerate(
-            destinations
-        ):
+        if image_path is not None and image_url is None:
+            try:
+                hosted_image = upload_image( image_path )
+                image_url = hosted_image.url
+                logger.info( "Image uploaded successfully: media ID %s", hosted_image.media_id )
+            except Exception as exception:
+                logger.exception( "Unable to upload image before Drop" )
+
+                if isinstance(exception, MediaUploadError):
+                    message = str(exception)
+                else:
+                    message = ( "An unexpected error occurred while uploading the image." )
+
+                failures = [
+                    {
+                        "destination": destination,
+                        "error": message,
+                        "retry_after": None,
+                        "rate_limited": False,
+                    }
+                    for destination in destinations
+                ]
+
+                GLib.idle_add(
+                    self._finish_drop,
+                    action,
+                    text,
+                    all_destinations,
+                    [],
+                    failures,
+                    image_path,
+                    None,
+                )
+
+                return
+
+        for index, destination in enumerate( destinations ):
             try:
                 if action == "idea":
-                    result = create_idea(
-                        destination["id"],
-                        text,
-                    )
-
+                    result = create_idea( destination["id"], text )
                 elif action == "draft":
-                    result = create_draft_post(
-                        destination["id"],
-                        text,
-                    )
-
+                    result = create_draft_post( destination["id"], text, image_url=image_url )
                 else:
-                    result = create_queue_post(
-                        destination["id"],
-                        text,
-                    )
+                    result = create_queue_post( destination["id"], text, image_url=image_url )
 
-                successes.append({
-                    "destination": destination,
-                    "result": result,
-                })
+                successes.append({ "destination": destination, "result": result })
 
-                logger.info(
-                    "Completed Buffer %s action for %s",
-                    action,
-                    destination["id"],
-                )
+                logger.info( "Completed Buffer %s action for %s", action, destination["id"] )
 
             except BufferRateLimitError as exception:
-                logger.warning(
-                    "Buffer rate limit reached"
-                )
+                logger.warning( "Buffer rate limit reached" )
 
                 failures.append({
                     "destination": destination,
                     "error": str(exception),
-                    "retry_after": (
-                        exception.retry_after
-                    ),
+                    "retry_after": ( exception.retry_after ),
                     "rate_limited": True,
                 })
 
                 # Don't hammer Buffer with the
                 # remaining destinations.
-                for remaining in destinations[
-                    index + 1:
-                ]:
+                for remaining in destinations[ index + 1: ]:
                     failures.append({
                         "destination": remaining,
-                        "error": (
-                            "Not attempted because "
-                            "Buffer's rate limit "
-                            "was reached."
-                        ),
-                        "retry_after": (
-                            exception.retry_after
-                        ),
+                        "error": ( "Not attempted because Buffer's rate limit was reached." ),
+                        "retry_after": ( exception.retry_after ),
                         "rate_limited": True,
                     })
 
                 break
 
             except Exception as exception:
-                logger.exception(
-                    "Unable to complete Buffer %s action for %s",
-                    action,
-                    destination["id"],
-                )
-
+                logger.exception( "Unable to complete Buffer %s action for %s", action, destination["id"] )
                 failures.append({
                     "destination": destination,
                     "error": str(exception),
@@ -791,62 +704,50 @@ class PostBopWindow(Adw.ApplicationWindow):
                     "rate_limited": False,
                 })
 
-        GLib.idle_add(
-            self._finish_drop,
-            action,
-            text,
-            all_destinations,
-            successes,
-            failures,
-        )
+        GLib.idle_add( self._finish_drop, action, text, all_destinations, successes, failures, image_path, image_url )
 
-    def _finish_drop(
-        self,
-        action: str,
-        text: str,
-        destinations: list[dict],
-        successes: list[dict],
-        failures: list[dict],
-    ):
+    def _finish_drop( self, action: str, text: str, destinations: list[dict], successes: list[dict], failures: list[dict], 
+                     image_path: Path | None = None, image_url: str | None = None ):
+        
         self._set_submitting(False)
 
-        total = (
-            len(successes)
-            + len(failures)
-        )
+        total = ( len(successes) + len(failures) )
 
         if failures:
-            self._set_retry_state(
-                action,
-                text,
-                destinations,
-                failures,
-            )
+            self._set_retry_state( action, text, destinations, failures, image_path, image_url )
 
             if successes:
-                self.status_label.set_text(
-                    f"Completed {len(successes)} "
-                    f"of {total} destinations."
-                )
+                self.status_label.set_text( f"Completed {len(successes)} of {total} destinations." )
             else:
-                self.status_label.set_text(
-                    "Buffer could not complete "
-                    "the action."
-                )
+                self.status_label.set_text( "Buffer could not complete the action." )
 
             return
 
         self._clear_retry_state()
 
-        self._remember_successful_action(
-            action,
-            destinations,
-        )
+        self._remember_successful_action( action, destinations )
 
         buffer = self.composer.get_buffer()
 
         self.suppress_composer_save = True
+
         buffer.set_text("")
+
+        if self.selected_image_path is not None:
+            try:
+                delete_cached_image( self.selected_image_path )
+
+            except (OSError, ValueError):
+                logger.exception( "Unable to clean up cached image after successful Drop" )
+
+            self.selected_image_path = None
+            self.selected_image_original_filename = None
+
+            self.image_preview.set_paintable( None )
+            self.image_filename_label.set_text( "" )
+            self.image_preview_box.set_visible( False )
+            self.attach_image_button.set_label( "Attach Image" )
+
         self.suppress_composer_save = False
 
         clear_composer_state()
@@ -856,32 +757,19 @@ class PostBopWindow(Adw.ApplicationWindow):
             "action": "queue",
             "channel_ids": [],
             "organization_id": None,
+            "image": None,
         }
 
         self.has_unfinished_composer = False
 
         if action == "idea":
-            self.status_label.set_text(
-                "Idea dropped to Buffer."
-            )
-
+            self.status_label.set_text( "Idea dropped to Buffer." )
         elif action == "draft":
-            self.status_label.set_text(
-                f"Dropped to Draft for "
-                f"{len(successes)} Buffer "
-                f"{'channel' if len(successes) == 1 else 'channels'}."
-            )
-
+            self.status_label.set_text( f"Dropped to Draft for {len(successes)} Buffer {'channel' if len(successes) == 1 else 'channels'}." )
         else:
-            self.status_label.set_text(
-                f"Dropped to {len(successes)} Buffer "
-                f"{'channel' if len(successes) == 1 else 'channels'}."
-            )
+            self.status_label.set_text( f"Dropped to {len(successes)} Buffer {'channel' if len(successes) == 1 else 'channels'}.")
 
-        self._notify_success(
-            action,
-            len(successes),
-        )
+        self._notify_success( action, len(successes) )
 
         if not self.preferences[ "keep_open_after_success" ]:
             application = self.get_application()
@@ -893,88 +781,52 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         self.composer.grab_focus()
 
-    def _remember_successful_action(
-        self,
-        action: str,
-        destinations: list[dict],
-    ):
-        self.preferences[
-            "last_action"
-        ] = action
+    def _remember_successful_action( self, action: str, destinations: list[dict] ):
+        self.preferences[ "last_action" ] = action
 
         if action == "idea":
-            self.preferences[
-                "last_idea_organization_id"
-            ] = destinations[0]["id"]
-
+            self.preferences[ "last_idea_organization_id" ] = destinations[0]["id"]
         else:
-            self.preferences[
-                "last_channel_ids"
-            ] = [
-                destination["id"]
-                for destination in destinations
+            self.preferences[ "last_channel_ids"] = [
+                destination["id"] for destination in destinations
             ]
 
         try:
-            save_preferences(
-                self.preferences
-            )
-
+            save_preferences( self.preferences )
         except OSError:
-            logger.exception(
-                "Unable to save PostBop preferences"
-            )
+            logger.exception( "Unable to save PostBop preferences" )
 
-    def _on_composer_changed(
-        self,
-        _buffer,
-    ):
-        if (
-            not self.suppress_composer_save
-            and self.retry_action is not None
-        ):
+    def _on_composer_changed( self, _buffer ):
+        if ( not self.suppress_composer_save and self.retry_action is not None ):
             self._clear_retry_state()
             
         self._update_drop_button_state()
         self._schedule_composer_state_save()
 
-
-    def _on_channel_toggled(
-        self,
-        _button,
-    ):
+    def _on_channel_toggled( self, _button ):
         self._update_drop_button_state()
         self._schedule_composer_state_save()
 
-    def _schedule_composer_state_save(
-        self,
-    ):
+    def _schedule_composer_state_save( self ):
         if self.suppress_composer_save:
             return
 
         if self.composer_save_source_id is not None:
-            GLib.source_remove(
-                self.composer_save_source_id
-            )
+            GLib.source_remove( self.composer_save_source_id )
 
-        self.composer_save_source_id = (
-            GLib.timeout_add(
-                500,
-                self._save_composer_state,
-            )
-        )
-
+        self.composer_save_source_id = ( GLib.timeout_add( 500, self._save_composer_state ) )
 
     def _save_composer_state(self):
         self.composer_save_source_id = None
 
         text = self._get_composer_text()
+        has_text = bool(text.strip())
 
-        if not text.strip():
+        has_image = ( self.selected_image_path is not None )
+
+        if not has_text and not has_image:
             clear_composer_state()
-
             self.has_unfinished_composer = False
-
             return False
 
         if self.destinations_loaded:
@@ -993,27 +845,27 @@ class PostBopWindow(Adw.ApplicationWindow):
                 if organization is not None
                 else None
             )
-
         else:
             # Preserve recovered destinations until
             # Buffer data has finished loading.
-            channel_ids = (
-                self.composer_state[
-                    "channel_ids"
-                ]
-            )
+            channel_ids = ( self.composer_state[ "channel_ids" ] )
 
-            organization_id = (
-                self.composer_state[
-                    "organization_id"
-                ]
-            )
+            organization_id = ( self.composer_state[ "organization_id" ] )
+
+        image_state = None
+
+        if self.selected_image_path is not None:
+            image_state = {
+                "cached_filename": ( self.selected_image_path.name ),
+                "original_filename": ( self.selected_image_original_filename or self.selected_image_path.name),
+            }
 
         state = {
             "text": text,
             "action": self.current_action,
             "channel_ids": channel_ids,
             "organization_id": organization_id,
+            "image": image_state,
         }
 
         try:
@@ -1021,62 +873,38 @@ class PostBopWindow(Adw.ApplicationWindow):
 
             self.composer_state = state
             self.has_unfinished_composer = True
-
         except OSError:
-            logger.exception(
-                "Unable to save unfinished composer"
-            )
+            logger.exception( "Unable to save unfinished composer" )
 
         return False
 
-    def _on_close_request(
-        self,
-        _window,
-    ):
+    def _on_close_request( self, _window ):
         if self.composer_save_source_id is not None:
-            GLib.source_remove(
-                self.composer_save_source_id
-            )
-
+            GLib.source_remove( self.composer_save_source_id)
             self.composer_save_source_id = None
 
         self._save_composer_state()
 
         return False
 
-    def _set_retry_state(
-        self,
-        action: str,
-        text: str,
-        all_destinations: list[dict],
-        failures: list[dict],
-    ):
+    def _set_retry_state( self, action: str, text: str, all_destinations: list[dict], failures: list[dict], 
+                         image_path: Path | None = None, image_url: str | None = None ):
+        
         self.retry_action = action
         self.retry_text = text
-        self.retry_all_destinations = (
-            all_destinations
-        )
+        self.retry_image_path = image_path
+        self.retry_image_url = image_url
+        self.retry_all_destinations = ( all_destinations )
 
-        self.retry_destinations = [
-            failure["destination"]
-            for failure in failures
-        ]
+        self.retry_destinations = [ failure["destination"] for failure in failures ]
 
         lines = []
 
         for failure in failures:
-            name = failure[
-                "destination"
-            ]["name"]
+            name = failure[ "destination" ]["name"]
+            lines.append( f"{name}: {failure['error']}")
 
-            lines.append(
-                f"{name}: "
-                f"{failure['error']}"
-            )
-
-        self.error_label.set_text(
-            "\n".join(lines)
-        )
+        self.error_label.set_text( "\n".join(lines) )
 
         retry_delays = [
             failure["retry_after"]
@@ -1087,20 +915,12 @@ class PostBopWindow(Adw.ApplicationWindow):
         ]
 
         if retry_delays:
-            retry_after = max(
-                retry_delays
-            )
-
-            self.retry_available_at = (
-                time.monotonic()
-                + retry_after
-            )
+            retry_after = max( retry_delays )
+            self.retry_available_at = ( time.monotonic() + retry_after )
         else:
             self.retry_available_at = None
 
-        self.error_revealer.set_reveal_child(
-            True
-        )
+        self.error_revealer.set_reveal_child( True )
 
         self._start_retry_timer()
         self._update_drop_button_state()
@@ -1112,129 +932,71 @@ class PostBopWindow(Adw.ApplicationWindow):
         self.retry_destinations = []
         self.retry_all_destinations = []
         self.retry_available_at = None
+        self.retry_image_path = None
+        self.retry_image_url = None
 
         if self.retry_timer_source_id is not None:
-            GLib.source_remove(
-                self.retry_timer_source_id
-            )
+            GLib.source_remove( self.retry_timer_source_id )
 
             self.retry_timer_source_id = None
 
-        self.error_revealer.set_reveal_child(
-            False
-        )
+        self.error_revealer.set_reveal_child( False )
 
-        self.retry_button.set_label(
-            "Retry Failed"
-        )
+        self.retry_button.set_label( "Retry Failed" )
 
 
     def _start_retry_timer(self):
         if self.retry_timer_source_id is not None:
-            GLib.source_remove(
-                self.retry_timer_source_id
-            )
-
+            GLib.source_remove( self.retry_timer_source_id )
             self.retry_timer_source_id = None
 
         if self.retry_available_at is None:
-            self.retry_button.set_label(
-                "Retry Failed"
-            )
-
-            self.retry_button.set_sensitive(
-                not self.is_submitting
-            )
-
+            self.retry_button.set_label( "Retry Failed" )
+            self.retry_button.set_sensitive( not self.is_submitting )
             return
 
-        self.retry_timer_source_id = (
-            GLib.timeout_add_seconds(
-                1,
-                self._update_retry_button,
-            )
-        )
+        self.retry_timer_source_id = ( GLib.timeout_add_seconds( 1, self._update_retry_button ) )
 
         self._update_retry_button()
-
 
     def _update_retry_button(self):
         if self.retry_action is None:
             self.retry_timer_source_id = None
-
             return False
 
         if self.is_submitting:
-            self.retry_button.set_sensitive(
-                False
-            )
-
+            self.retry_button.set_sensitive( False )
             return True
 
         if self.retry_available_at is None:
-            self.retry_button.set_label(
-                "Retry Failed"
-            )
-
-            self.retry_button.set_sensitive(
-                True
-            )
-
+            self.retry_button.set_label( "Retry Failed" )
+            self.retry_button.set_sensitive( True )
             self.retry_timer_source_id = None
-
             return False
 
-        remaining = math.ceil(
-            self.retry_available_at
-            - time.monotonic()
-        )
+        remaining = math.ceil( self.retry_available_at - time.monotonic() )
 
         if remaining <= 0:
             self.retry_available_at = None
-
-            self.retry_button.set_label(
-                "Retry Failed"
-            )
-
-            self.retry_button.set_sensitive(
-                True
-            )
-
+            self.retry_button.set_label( "Retry Failed" )
+            self.retry_button.set_sensitive( True )
             self.retry_timer_source_id = None
-
             return False
 
-        minutes, seconds = divmod(
-            remaining,
-            60,
-        )
+        minutes, seconds = divmod( remaining, 60 )
 
         if minutes:
-            label = (
-                f"Retry in {minutes}m "
-                f"{seconds}s"
-            )
+            label = ( f"Retry in {minutes}m {seconds}s" )
         else:
-            label = (
-                f"Retry in {seconds}s"
-            )
+            label = ( f"Retry in {seconds}s" )
 
         self.retry_button.set_label(label)
-
-        self.retry_button.set_sensitive(
-            False
-        )
+        self.retry_button.set_sensitive( False )
 
         return True
 
-    def _on_retry_clicked(
-        self,
-        _button,
-    ):
-        if (
-            self.retry_action is None
-            or not self.retry_destinations
-        ):
+    def _on_retry_clicked( self, _button ):
+        if ( self.retry_action is None or not self.retry_destinations ):
             return
 
         if self.retry_available_at is not None:
@@ -1243,17 +1005,10 @@ class PostBopWindow(Adw.ApplicationWindow):
         action = self.retry_action
         text = self.retry_text
 
-        retry_destinations = (
-            self.retry_destinations.copy()
-        )
+        retry_destinations = ( self.retry_destinations.copy() )
+        all_destinations = ( self.retry_all_destinations.copy() )
 
-        all_destinations = (
-            self.retry_all_destinations.copy()
-        )
-
-        self.status_label.set_text(
-            "Retrying failed destinations..."
-        )
+        self.status_label.set_text( "Retrying failed destinations..." )
 
         self._set_submitting(True)
 
@@ -1264,6 +1019,8 @@ class PostBopWindow(Adw.ApplicationWindow):
                 text,
                 retry_destinations,
                 all_destinations,
+                self.retry_image_path,
+                self.retry_image_url,
             ),
             daemon=True,
         )
@@ -1273,19 +1030,10 @@ class PostBopWindow(Adw.ApplicationWindow):
     def _notify_success( self, action: str,  count: int ):
         if action == "idea":
             body = "Idea dropped to Buffer."
-
         elif action == "draft":
-            body = (
-                f"Dropped to Draft for "
-                f"{count} Buffer "
-                f"{'channel' if count == 1 else 'channels'}."
-            )
-
+            body = ( f"Dropped to Draft for {count} Buffer {'channel' if count == 1 else 'channels'}." )
         else:
-            body = (
-                f"Dropped to {count} Buffer "
-                f"{'channel' if count == 1 else 'channels'}."
-            )
+            body = ( f"Dropped to {count} Buffer {'channel' if count == 1 else 'channels'}." )
 
         application = self.get_application()
 
@@ -1379,7 +1127,8 @@ class PostBopWindow(Adw.ApplicationWindow):
                     if ( not isinstance(media_token, str) or not media_token ):
                         raise RuntimeError( "Companion did not return a media credential" )
                     try:
-                        exchange_authorization_code( authorization_code, code_verifier )
+                        tokens = exchange_authorization_code( authorization_code, code_verifier )
+                        activate_media_credential( media_token, tokens["access_token"] )
                         store_media_token( media_token )
                     except Exception:
                         clear_tokens()
@@ -1445,14 +1194,7 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         self.composer_state[ "channel_ids" ] = []
         self.composer_state[ "organization_id" ] = None
-
-        text = self._get_composer_text()
-        if text.strip():
-            try:
-                save_composer_state( self.composer_state )
-            except OSError:
-                logger.exception( "Unable to update composer state after Buffer disconnect" )
-
+        self._save_composer_state()
         self._show_disconnected_state()
 
     def handle_incoming_text( self, incoming_text: str ):
@@ -1506,3 +1248,170 @@ class PostBopWindow(Adw.ApplicationWindow):
         if not self.drop_button.get_sensitive():
             return
         self._on_drop_clicked( self.drop_button )
+
+    def _on_attach_image_clicked( self, _button ):
+        dialog = Gtk.FileDialog()
+
+        dialog.set_title( "Select an Image" )
+
+        image_filter = Gtk.FileFilter()
+        image_filter.set_name( "Supported Images" )
+
+        image_filter.add_mime_type( "image/jpeg" )
+        image_filter.add_mime_type( "image/png" )
+        image_filter.add_mime_type( "image/webp" )
+
+        filters = Gio.ListStore.new( Gtk.FileFilter )
+
+        filters.append( image_filter )
+
+        dialog.set_filters( filters )
+
+        dialog.set_default_filter( image_filter )
+
+        dialog.open( self, None, self._on_image_file_selected )
+
+    def _on_image_file_selected( self, dialog, result ):
+        try:
+            file = dialog.open_finish( result )            
+        except GLib.Error:
+            # The user canceled the file picker.
+            return
+
+        path = file.get_path()
+
+        if path is None:
+            self.status_label.set_text( "Please select a local image file." )
+            return
+
+        self._attach_image_from_path( Path(path) )
+
+    def _on_remove_image_clicked( self, _button ):
+        if self.is_submitting:
+            return
+        if self.retry_action is not None:
+            self._clear_retry_state()
+
+        if self.selected_image_path is not None:
+            try:
+                delete_cached_image( self.selected_image_path )
+            except ( OSError, ValueError ):
+                logger.exception( "Unable to remove cached image" )
+                
+        self.selected_image_path = None
+        self.selected_image_original_filename = None
+        self.image_preview.set_paintable( None )
+        self.image_filename_label.set_text( "" )
+        self.image_preview_box.set_visible( False )
+        self.attach_image_button.set_label( "Attach Image" )
+
+        self._update_drop_button_state()
+        self._schedule_composer_state_save()
+
+    def _restore_cached_image( self ):
+        image_state = self.composer_state.get( "image" )
+        if image_state is None:
+            return
+
+        cached_path = get_cached_image( image_state["cached_filename"] )
+
+        if cached_path is None:
+            logger.warning( "Previously cached image is missing" )
+            self.composer_state["image"] = None
+            self._schedule_composer_state_save()
+            return
+
+        file = Gio.File.new_for_path( str(cached_path) )
+
+        try:
+            texture = Gdk.Texture.new_from_file( file )
+
+        except GLib.Error:
+            logger.exception( "Unable to restore cached image" )
+            self.composer_state["image"] = None
+            self._schedule_composer_state_save()
+            return
+
+        self.selected_image_path = cached_path
+        self.selected_image_original_filename = ( image_state["original_filename"] )
+        self.image_preview.set_paintable( texture )
+        self.image_filename_label.set_text( self.selected_image_original_filename )
+        self.image_preview_box.set_visible( True )
+        self.attach_image_button.set_label( "Change Image" )
+        self._update_drop_button_state()
+
+        logger.info( "Restored cached image attachment" )
+
+    def _attach_image_from_path( self, image_path: Path ) -> bool:
+        if self.is_submitting:
+            return False
+
+        try:
+            cached_path = cache_image( image_path )
+        except (OSError, ValueError) as exception:
+            logger.warning( "Unable to attach image: %s", exception )
+            self.status_label.set_text( str(exception) )
+            return False
+
+        file = Gio.File.new_for_path( str(cached_path) )
+
+        try:
+            texture = Gdk.Texture.new_from_file( file )
+
+        except GLib.Error:
+            logger.exception( "Unable to preview cached image" )
+            delete_cached_image( cached_path )
+            self.status_label.set_text( "Unable to preview the selected image." )
+            return False
+
+        previous_image = self.selected_image_path
+
+        if self.retry_action is not None:
+            self._clear_retry_state()
+
+        self.selected_image_path = cached_path
+        self.selected_image_original_filename = ( image_path.name )
+        self.image_preview.set_paintable( texture )
+        self.image_filename_label.set_text( image_path.name )
+        self.image_preview_box.set_visible( True )
+
+        self.attach_image_button.set_label( "Change Image" )
+        self.status_label.set_text( "Image attached." )
+
+        self._update_drop_button_state()
+        self._schedule_composer_state_save()
+
+        if previous_image is not None:
+            try:
+                delete_cached_image( previous_image )
+            except (OSError, ValueError):
+                logger.exception( "Unable to remove previous cached image" )
+
+        return True
+
+    def _on_image_dropped( self, _target, value, _x, _y ) -> bool:
+        if self.is_submitting:
+            return False
+
+        if not isinstance( value, Gdk.FileList ):
+            return False
+
+        files = value.get_files()
+
+        if not files:
+            return False
+
+        if len(files) != 1:
+            self.status_label.set_text( "Please drop only one image." )
+            return True
+
+        file = files[0]
+
+        path = file.get_path()
+
+        if path is None:
+            self.status_label.set_text( "Please drop a local image file." )
+
+            return True
+
+        return self._attach_image_from_path( Path(path) )

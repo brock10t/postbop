@@ -43,6 +43,7 @@ class MediaCredentialRepository
                 FROM media_credentials
                 WHERE token_hash = :token_hash
                 AND revoked_at IS NULL
+                AND verified_at IS NOT NULL
                 LIMIT 1'
         );
 
@@ -67,5 +68,71 @@ class MediaCredentialRepository
         ]);
 
         return $credential;
+    }
+
+    public function canActivate( string $token ): bool {
+        if ( !preg_match( '/^pbm_[a-f0-9]{64}$/', $token ) ) {
+            return false;
+        }
+
+        $statement = $this->connection->prepare(
+            '
+            SELECT id
+            FROM media_credentials
+            WHERE token_hash = :token_hash
+            AND revoked_at IS NULL
+            LIMIT 1
+            '
+        );
+
+        $statement->execute([ 'token_hash' => hash('sha256', $token), ]);
+
+        return $statement->fetch() !== false;
+    }
+
+    public function activate( string $token, string $bufferAccountId ): bool {
+        $tokenHash = hash( 'sha256', $token );
+
+        $statement = $this->connection->prepare(
+            '
+            UPDATE media_credentials
+            SET
+                verified_at = CURRENT_TIMESTAMP,
+                buffer_account_id = :account_id
+            WHERE token_hash = :token_hash
+            AND revoked_at IS NULL
+            AND verified_at IS NULL
+            '
+        );
+
+        $statement->execute([
+            'account_id' => $bufferAccountId,
+            'token_hash' => $tokenHash,
+        ]);
+
+        if ( $statement->rowCount() === 1 ) {
+            return true;
+        }
+
+        // Permit a retry if activation already succeeded
+        // for this same Buffer account.
+        $statement = $this->connection->prepare(
+            '
+            SELECT id
+            FROM media_credentials
+            WHERE token_hash = :token_hash
+            AND revoked_at IS NULL
+            AND verified_at IS NOT NULL
+            AND buffer_account_id = :account_id
+            LIMIT 1
+            '
+        );
+
+        $statement->execute([
+            'token_hash' => $tokenHash,
+            'account_id' => $bufferAccountId,
+        ]);
+
+        return $statement->fetch() !== false;
     }
 }
