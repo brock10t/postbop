@@ -86,7 +86,7 @@ class PostBopWindow(Adw.ApplicationWindow):
         self.retry_timer_source_id = None
 
         self.set_title( "PostBop" )
-        self.set_default_size( 500, 520 )
+        self.set_default_size( 900, 500 )
 
         self.selected_image_path: Path | None = None
         self.selected_image_original_filename: str | None = None
@@ -115,17 +115,66 @@ class PostBopWindow(Adw.ApplicationWindow):
         header_bar.pack_end( menu_button )
         toolbar_view.add_top_bar( header_bar )
 
-        root = Gtk.Box( orientation=Gtk.Orientation.VERTICAL, spacing=12 )
+        root = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            spacing=18,
+        )
+        root.set_homogeneous(True)
 
-        root.set_margin_top( 18 )
-        root.set_margin_bottom( 18 )
-        root.set_margin_start( 18 )
-        root.set_margin_end( 18 )
+        root.set_margin_top(18)
+        root.set_margin_bottom(18)
+        root.set_margin_start(18)
+        root.set_margin_end(18)
+
+        # Left column: composer and attachments
+        left_column = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=12,
+        )
+
+        left_scroll = Gtk.ScrolledWindow()
+        left_scroll.set_policy(
+            Gtk.PolicyType.NEVER,
+            Gtk.PolicyType.AUTOMATIC,
+        )
+        left_scroll.set_min_content_width(320)
+        left_scroll.set_hexpand(True)
+        left_scroll.set_vexpand(True)
+        left_scroll.set_child(left_column)
+
+        # Right column: actions, destinations, and feedback
+        right_column = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=12,
+        )
+        
+
+        right_column.set_hexpand(True)
+        right_column.set_vexpand(True)
+
+        right_content = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=12,
+        )
+
+        right_scroll = Gtk.ScrolledWindow()
+        right_scroll.set_policy(
+            Gtk.PolicyType.NEVER,
+            Gtk.PolicyType.AUTOMATIC,
+        )
+        right_scroll.set_min_content_width(320)
+        right_scroll.set_hexpand(True)
+        right_scroll.set_vexpand(True)
+        right_scroll.set_child(right_content)
+
+        # Add both columns to the main layout
+        root.append(left_scroll)
+        root.append(right_column)
 
         composer_label = Gtk.Label( label="Post", xalign=0 )
         composer_label.add_css_class( "heading" )
 
-        root.append( composer_label )
+        left_column.append( composer_label )
 
         self.composer = Gtk.TextView()
         self.composer.set_wrap_mode( Gtk.WrapMode.WORD_CHAR )
@@ -146,13 +195,13 @@ class PostBopWindow(Adw.ApplicationWindow):
         composer_scroll.set_vexpand( False )
         composer_scroll.set_child( self.composer )
 
-        root.append( composer_scroll )
+        left_column.append( composer_scroll )
 
         self.character_status_label = Gtk.Label( label="", xalign=0 )
         self.character_status_label.set_wrap( True )
         self.character_status_label.add_css_class( "dim-label" )
 
-        root.append( self.character_status_label )
+        left_column.append( self.character_status_label )
 
         image_box = Gtk.Box( orientation=Gtk.Orientation.VERTICAL, spacing=8 )
 
@@ -207,7 +256,7 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         image_box.append( self.image_preview_box )
 
-        root.append( image_box )
+        left_column.append( image_box )
 
         link_box = Gtk.Box( orientation=Gtk.Orientation.VERTICAL, spacing=6 )
         link_label = Gtk.Label( label="Link Attachment", xalign=0 )
@@ -230,24 +279,24 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         link_box.append(self.link_status_label)
 
-        root.append(link_box)
+        left_column.append( link_box )
 
         action_label = Gtk.Label( label="Action", xalign=0 )
         action_label.add_css_class( "heading" )
 
-        root.append( action_label )
+        right_content.append( action_label )
 
         self.action_dropdown = Gtk.DropDown.new_from_strings([ "Drop to Queue", "Drop to Draft", "Drop Idea" ])
         self.action_dropdown.set_selected( self.action_keys.index( self.current_action ) )
         self.action_dropdown.connect( "notify::selected", self._on_action_changed )
 
-        root.append( self.action_dropdown )
+        right_content.append( self.action_dropdown )
 
         self.destination_label = Gtk.Label( label="Channels", xalign=0 )
 
         self.destination_label.add_css_class( "heading" )
 
-        root.append( self.destination_label )
+        right_content.append( self.destination_label )
 
         self.destination_stack = Gtk.Stack()
 
@@ -290,12 +339,12 @@ class PostBopWindow(Adw.ApplicationWindow):
         self.destination_stack.add_named( organization_box, "organization" )
         self.destination_stack.set_visible_child_name( "channels" )
 
-        root.append( self.destination_stack )
+        right_content.append( self.destination_stack )
 
         self.status_label = Gtk.Label( label="", xalign=0 )
         self.status_label.set_wrap( True )
 
-        root.append( self.status_label )
+        right_content.append( self.status_label )
 
         self.error_revealer = Gtk.Revealer()
         self.error_revealer.set_reveal_child( False )
@@ -331,38 +380,24 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         self.error_revealer.set_child( error_box )
 
-        root.append( self.error_revealer )
+        right_content.append( self.error_revealer )
 
         self.drop_button = Gtk.Button( label="Drop to Queue" )
         self.drop_button.add_css_class( "suggested-action" )
         self.drop_button.connect( "clicked", self._on_drop_clicked )
         self.drop_button.set_sensitive( False )
 
-        bottom_bar = Gtk.Box( orientation=Gtk.Orientation.VERTICAL, )
+        right_column.append(right_scroll)
+        right_column.append(self.drop_button)
 
-        bottom_bar.add_css_class( "toolbar" )
+        toolbar_view.set_content(root)
 
-        bottom_bar.set_margin_top( 8 )
-        bottom_bar.set_margin_bottom( 8 )
-        bottom_bar.set_margin_start( 18 )
-        bottom_bar.set_margin_end( 18 )
+        self.set_content(toolbar_view)
 
-        bottom_bar.append( self.drop_button )
-
-        toolbar_view.add_bottom_bar( bottom_bar )
-
-        main_scroll = Gtk.ScrolledWindow()
-
-        main_scroll.set_policy( Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC )
-
-        main_scroll.set_vexpand( True )
-        main_scroll.set_child( root )
-
-        toolbar_view.set_content( main_scroll )
-
-        self.set_content( toolbar_view )
-
-        self.connect( "close-request", self._on_close_request )
+        self.connect(
+            "close-request",
+            self._on_close_request,
+        )
 
         self._update_destination_mode()
 
@@ -492,9 +527,16 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         logger.info( "Loaded %d Buffer channels", channel_count )
 
-        self.status_label.set_text(
-            f"{channel_count} Buffer {'channel' if channel_count == 1 else 'channels'}  available."
+        channel_count_label = Gtk.Label(
+            label=f"{channel_count} Buffer {'channel' if channel_count == 1 else 'channels'} available.",
+            xalign=0,
         )
+
+        channel_count_label.add_css_class( "dim-label" )
+
+        self.channel_box.prepend( channel_count_label )
+
+        self.status_label.set_text( "" )
 
         self.destinations_loaded = True
         self.suppress_composer_save = False

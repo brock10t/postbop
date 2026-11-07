@@ -34,12 +34,19 @@ class ChannelCharacterCheck:
 
     @property
     def over_limit(self) -> bool:
-        # Never reject a post based solely on an estimate.
-        return (
-            self.exact
-            and self.remaining is not None
-            and self.remaining < 0
-        )
+        if self.remaining is None or self.remaining >= 0:
+            return False
+
+        # Exact counts always enforce the platform limit.
+        if self.exact:
+            return True
+
+        # Block substantially oversized estimated Bluesky posts.
+        if self.service == "bluesky":
+            return self.used >= self.limit * 1.5
+
+        # Other estimates remain advisory.
+        return False
 
 def count_utf16(text: str) -> int:
     return len( text.encode("utf-16-le") ) // 2
