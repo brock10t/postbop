@@ -527,9 +527,16 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         logger.info( "Loaded %d Buffer channels", channel_count )
 
-        self.status_label.set_text(
-            f"{channel_count} Buffer {'channel' if channel_count == 1 else 'channels'}  available."
+        channel_count_label = Gtk.Label(
+            label=f"{channel_count} Buffer {'channel' if channel_count == 1 else 'channels'} available.",
+            xalign=0,
         )
+
+        channel_count_label.add_css_class( "dim-label" )
+
+        self.channel_box.prepend( channel_count_label )
+
+        self.status_label.set_text( "" )
 
         self.destinations_loaded = True
         self.suppress_composer_save = False
