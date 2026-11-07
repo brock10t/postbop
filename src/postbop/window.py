@@ -10,8 +10,8 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 
 from .api.buffer_client import ( create_draft_post, create_idea, create_queue_post,
-                                get_account, get_channels, BufferRateLimitError, 
-                                BufferSubmissionUncertainError )
+                                get_account, get_channels, _build_link_metadata, 
+                                BufferRateLimitError, BufferSubmissionUncertainError )
 from .api.buffer_auth import exchange_authorization_code
 from .api.companion import ( activate_media_credential, create_oauth_session, get_oauth_result )
 from .api.oauth import ( build_authorization_url, generate_code_challenge, generate_code_verifier,
@@ -60,6 +60,7 @@ class PostBopWindow(Adw.ApplicationWindow):
         self.has_unfinished_composer = bool(
             self.composer_state["text"].strip()
             or cached_image_path is not None
+            or self.composer_state.get("link_url", "").strip()
         )
 
         self.composer_save_source_id = None
@@ -77,6 +78,7 @@ class PostBopWindow(Adw.ApplicationWindow):
         self.retry_all_destinations = []
         self.retry_image_path = None
         self.retry_image_url = None
+        self.retry_link_url = None
         self.retry_uncertain = []
         self.retry_failures = []
 
@@ -140,7 +142,8 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         composer_scroll = Gtk.ScrolledWindow()
         composer_scroll.set_min_content_height( 150 )
-        composer_scroll.set_vexpand( True )
+        composer_scroll.set_max_content_height( 180 )
+        composer_scroll.set_vexpand( False )
         composer_scroll.set_child( self.composer )
 
         root.append( composer_scroll )
@@ -205,6 +208,29 @@ class PostBopWindow(Adw.ApplicationWindow):
         image_box.append( self.image_preview_box )
 
         root.append( image_box )
+
+        link_box = Gtk.Box( orientation=Gtk.Orientation.VERTICAL, spacing=6 )
+        link_label = Gtk.Label( label="Link Attachment", xalign=0 )
+        link_box.append(link_label)
+
+        self.link_entry = Gtk.Entry()
+        self.link_entry.set_placeholder_text( "https://example.com/article" )
+        self.link_entry.set_input_purpose( Gtk.InputPurpose.URL )
+        self.link_entry.set_max_length( 2048 )
+        self.link_entry.set_text( self.composer_state.get("link_url", "") )
+
+        self.link_entry.connect( "changed", self._on_link_changed )
+
+        link_box.append(self.link_entry)
+
+        self.link_status_label = Gtk.Label( label="", xalign=0 )
+        self.link_status_label.set_wrap(True)
+        self.link_status_label.add_css_class("dim-label")
+        self.link_status_label.set_visible(False)
+
+        link_box.append(self.link_status_label)
+
+        root.append(link_box)
 
         action_label = Gtk.Label( label="Action", xalign=0 )
         action_label.add_css_class( "heading" )
@@ -312,13 +338,31 @@ class PostBopWindow(Adw.ApplicationWindow):
         self.drop_button.connect( "clicked", self._on_drop_clicked )
         self.drop_button.set_sensitive( False )
 
-        root.append( self.drop_button )
+        bottom_bar = Gtk.Box( orientation=Gtk.Orientation.VERTICAL, )
 
-        toolbar_view.set_content( root )
+        bottom_bar.add_css_class( "toolbar" )
+
+        bottom_bar.set_margin_top( 8 )
+        bottom_bar.set_margin_bottom( 8 )
+        bottom_bar.set_margin_start( 18 )
+        bottom_bar.set_margin_end( 18 )
+
+        bottom_bar.append( self.drop_button )
+
+        toolbar_view.add_bottom_bar( bottom_bar )
+
+        main_scroll = Gtk.ScrolledWindow()
+
+        main_scroll.set_policy( Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC )
+
+        main_scroll.set_vexpand( True )
+        main_scroll.set_child( root )
+
+        toolbar_view.set_content( main_scroll )
 
         self.set_content( toolbar_view )
 
-        self.connect( "close-request", self._on_close_request)
+        self.connect( "close-request", self._on_close_request )
 
         self._update_destination_mode()
 
@@ -547,8 +591,12 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         has_text = bool(text.strip())
         has_image = ( self.selected_image_path is not None )
+        link_url = self._get_link_url()
+        has_link = link_url is not None
 
-        has_content = has_text or has_image
+        has_content = has_text or has_image or has_link
+
+        channels = []
 
         if self.current_action == "idea":
             has_destination = ( self._get_selected_organization() is not None )
@@ -557,6 +605,27 @@ class PostBopWindow(Adw.ApplicationWindow):
             channels = self._get_selected_channels()
             has_destination = bool(channels)
             character_checks = check_selected_channels( text,   channels )
+
+        link_destinations = (
+            []
+            if self.current_action == "idea"
+            else channels
+        )
+
+        link_error = self._link_validation_error(
+            self.current_action,
+            link_destinations,
+            self.selected_image_path,
+            link_url,
+        )
+
+        self.link_status_label.set_visible(
+            link_error is not None
+        )
+
+        self.link_status_label.set_text(
+            link_error or ""
+        )
 
         summaries = []
 
@@ -608,6 +677,7 @@ class PostBopWindow(Adw.ApplicationWindow):
             and not self.is_submitting
             and self.retry_action is None
             and not has_character_errors
+            and not link_error
             and not (
                 self.current_action == "idea"
                 and has_image
@@ -642,8 +712,9 @@ class PostBopWindow(Adw.ApplicationWindow):
             return
 
         image_path = self.selected_image_path
+        link_url = self._get_link_url()
 
-        if not text.strip() and image_path is None:
+        if not text.strip() and image_path is None and link_url is None:
             return
 
         action = self.current_action
@@ -652,21 +723,25 @@ class PostBopWindow(Adw.ApplicationWindow):
             return
 
         if action == "idea":
-            organization = ( self._get_selected_organization() )
+            organization = self._get_selected_organization()
 
             if organization is None:
                 return
 
-            destinations = [{ "id": organization["id"], "name": organization["name"], }]
+            destinations = [{
+                "id": organization["id"],
+                "name": organization["name"],
+            }]
 
         else:
-            destinations = ( self._get_selected_channels() )
+            destinations = self._get_selected_channels()
 
             if not destinations:
                 return
 
         if action != "idea":
             character_checks = check_selected_channels( text, destinations )
+
             invalid_channels = [
                 check
                 for check in character_checks
@@ -675,41 +750,65 @@ class PostBopWindow(Adw.ApplicationWindow):
 
             if invalid_channels:
                 details = ", ".join(
-                    ( f"{check.channel_name} ({abs(check.remaining):,} characters over)" )
+                    f"{check.channel_name} "
+                    f"({abs(check.remaining):,} characters over)"
                     for check in invalid_channels
                 )
+
                 self.status_label.set_text( f"Post exceeds character limits: {details}" )
+
                 self._update_drop_button_state()
                 return
 
-        destination_count = len( destinations )
+        link_error = self._link_validation_error(
+            action,
+            destinations,
+            image_path,
+            link_url,
+        )
+
+        if link_error:
+            self.status_label.set_text(link_error)
+            self._update_drop_button_state()
+            return
+
+        destination_count = len(destinations)
 
         if action == "idea":
             self.status_label.set_text( "Dropping Idea..." )
 
         elif action == "draft":
             self.status_label.set_text(
-                f"Dropping to Draft for {destination_count} {'channel' if destination_count == 1 else 'channels'}..."
+                f"Dropping to Draft for {destination_count} "
+                f"{'channel' if destination_count == 1 else 'channels'}..."
             )
-
         else:
             self.status_label.set_text(
-                f"Dropping to {destination_count} {'channel' if destination_count == 1 else 'channels'}..."
+                f"Dropping to {destination_count} "
+                f"{'channel' if destination_count == 1 else 'channels'}..."
             )
 
         self._set_submitting(True)
 
         thread = threading.Thread(
             target=self._drop_posts_worker,
-            args=( action, text, destinations, None, image_path, None ),
+            args=(
+                action,
+                text,
+                destinations,
+                None,
+                image_path,
+                None,
+                link_url,
+            ),
             daemon=True,
         )
 
         thread.start()
 
-    def _drop_posts_worker( self, action: str, text: str, destinations: list[dict], all_destinations: list[dict] | None = None, 
-                           image_path: Path | None = None, image_url: str | None = None ):
-        
+    def _drop_posts_worker( self, action: str, text: str, destinations: list[dict], all_destinations: list[dict] | None = None,
+                        image_path: Path | None = None, image_url: str | None = None, link_url: str | None = None ):
+
         successes = []
         failures = []
 
@@ -721,6 +820,7 @@ class PostBopWindow(Adw.ApplicationWindow):
                 hosted_image = upload_image( image_path )
                 image_url = hosted_image.url
                 logger.info( "Image uploaded successfully: media ID %s", hosted_image.media_id )
+
             except Exception as exception:
                 logger.exception( "Unable to upload image before Drop" )
 
@@ -748,6 +848,7 @@ class PostBopWindow(Adw.ApplicationWindow):
                     failures,
                     image_path,
                     None,
+                    link_url,
                 )
 
                 return
@@ -755,20 +856,46 @@ class PostBopWindow(Adw.ApplicationWindow):
         for index, destination in enumerate( destinations ):
             try:
                 if action == "idea":
-                    result = create_idea( destination["id"], text )
+                    result = create_idea(
+                        destination["id"],
+                        text
+                    )
+
                 elif action == "draft":
-                    result = create_draft_post( destination["id"], text, image_url=image_url )
+                    result = create_draft_post(
+                        destination["id"],
+                        text,
+                        image_url=image_url,
+                        link_url=link_url,
+                        service=destination.get("service"),
+                    )
+
                 else:
-                    result = create_queue_post( destination["id"], text, image_url=image_url )
+                    result = create_queue_post(
+                        destination["id"],
+                        text,
+                        image_url=image_url,
+                        link_url=link_url,
+                        service=destination.get("service"),
+                    )
 
-                successes.append({ "destination": destination, "result": result })
+                successes.append({
+                    "destination": destination,
+                    "result": result,
+                })
 
-                logger.info( "Completed Buffer %s action for %s", action, destination["id"] )
+                logger.info(
+                    "Completed Buffer %s action for %s",
+                    action,
+                    destination["id"],
+                )
 
             except BufferSubmissionUncertainError as exception:
                 logger.warning(
                     "Uncertain Buffer %s submission for %s: %s",
-                    action, destination["id"], exception,
+                    action,
+                    destination["id"],
+                    exception,
                 )
 
                 failures.append({
@@ -782,7 +909,8 @@ class PostBopWindow(Adw.ApplicationWindow):
                     "uncertain": True,
                 })
 
-                # These destinations were definitely not attempted. They can be retried safely.
+                # These destinations were definitely not attempted.
+                # They can be retried safely.
                 for remaining in destinations[index + 1:]:
                     failures.append({
                         "destination": remaining,
@@ -803,24 +931,30 @@ class PostBopWindow(Adw.ApplicationWindow):
                 failures.append({
                     "destination": destination,
                     "error": str(exception),
-                    "retry_after": ( exception.retry_after ),
+                    "retry_after": exception.retry_after,
                     "rate_limited": True,
                 })
 
-                # Don't hammer Buffer with the
-                # remaining destinations.
-                for remaining in destinations[ index + 1: ]:
+                # Don't hammer Buffer with the remaining destinations.
+                for remaining in destinations[index + 1:]:
                     failures.append({
                         "destination": remaining,
-                        "error": ( "Not attempted because Buffer's rate limit was reached." ),
-                        "retry_after": ( exception.retry_after ),
+                        "error": (
+                            "Not attempted because Buffer's rate limit was reached."
+                        ),
+                        "retry_after": exception.retry_after,
                         "rate_limited": True,
                     })
 
                 break
 
             except Exception as exception:
-                logger.exception( "Unable to complete Buffer %s action for %s", action, destination["id"] )
+                logger.exception(
+                    "Unable to complete Buffer %s action for %s",
+                    action,
+                    destination["id"],
+                )
+
                 failures.append({
                     "destination": destination,
                     "error": str(exception),
@@ -828,14 +962,24 @@ class PostBopWindow(Adw.ApplicationWindow):
                     "rate_limited": False,
                 })
 
-        GLib.idle_add( self._finish_drop, action, text, all_destinations, successes, failures, image_path, image_url )
+        GLib.idle_add(
+            self._finish_drop,
+            action,
+            text,
+            all_destinations,
+            successes,
+            failures,
+            image_path,
+            image_url,
+            link_url,
+        )
 
     def _finish_drop( self, action: str, text: str, destinations: list[dict], successes: list[dict],
-                     failures: list[dict], image_path: Path | None = None, image_url: str | None = None ):
-        
+                  failures: list[dict], image_path: Path | None = None, image_url: str | None = None,
+                  link_url: str | None = None ):
+
         self._set_submitting(False)
 
-        # A retry only attempted the safe destinations. Preserve uncertain outcomes from earlier attempts.
         if self.retry_action is not None:
             failure_ids = {
                 failure["destination"]["id"]
@@ -856,6 +1000,7 @@ class PostBopWindow(Adw.ApplicationWindow):
                 failures,
                 image_path,
                 image_url,
+                link_url,
             )
 
             return
@@ -921,8 +1066,9 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         has_text = bool(text.strip())
         has_image = self.selected_image_path is not None
+        has_link = self._get_link_url() is not None
 
-        if not has_text and not has_image:
+        if not has_text and not has_image and not has_link:
             try:
                 clear_composer_state()
             except OSError:
@@ -971,6 +1117,7 @@ class PostBopWindow(Adw.ApplicationWindow):
             "channel_ids": channel_ids,
             "organization_id": organization_id,
             "image": image_state,
+            "link_url": self._get_link_url() or "",
         }
 
         try:
@@ -994,12 +1141,14 @@ class PostBopWindow(Adw.ApplicationWindow):
         return False
 
     def _set_retry_state( self, action: str, text: str, all_destinations: list[dict], failures: list[dict],
-                         image_path: Path | None = None, image_url: str | None = None ):
-        
+                      image_path: Path | None = None, image_url: str | None = None,
+                      link_url: str | None = None ):
+
         self.retry_action = action
         self.retry_text = text
         self.retry_image_path = image_path
         self.retry_image_url = image_url
+        self.retry_link_url = link_url
 
         self.retry_all_destinations = ( all_destinations.copy() )
 
@@ -1078,22 +1227,20 @@ class PostBopWindow(Adw.ApplicationWindow):
         self.retry_available_at = None
         self.retry_image_path = None
         self.retry_image_url = None
+        self.retry_link_url = None
         self.retry_uncertain = []
         self.retry_failures = []
-        self.retry_uncertain = []
 
         self.resolve_unknown_button.set_visible(False)
         self.open_buffer_error_button.set_visible(False)
 
         if self.retry_timer_source_id is not None:
             GLib.source_remove( self.retry_timer_source_id )
-
             self.retry_timer_source_id = None
 
         self.error_revealer.set_reveal_child( False )
 
         self.retry_button.set_label( "Retry Failed" )
-
 
     def _start_retry_timer(self):
         if self.retry_timer_source_id is not None:
@@ -1162,6 +1309,7 @@ class PostBopWindow(Adw.ApplicationWindow):
                 all_destinations,
                 self.retry_image_path,
                 self.retry_image_url,
+                self.retry_link_url,
             ),
             daemon=True,
         )
@@ -1700,6 +1848,7 @@ class PostBopWindow(Adw.ApplicationWindow):
         self.suppress_composer_save = True
 
         buffer.set_text("")
+        self.link_entry.set_text("")
 
         if self.selected_image_path is not None:
             try:
@@ -1727,6 +1876,7 @@ class PostBopWindow(Adw.ApplicationWindow):
             "channel_ids": [],
             "organization_id": None,
             "image": None,
+            "link_url": "",
         }
 
         self.has_unfinished_composer = False
@@ -1758,3 +1908,35 @@ class PostBopWindow(Adw.ApplicationWindow):
             return
 
         self.composer.grab_focus()
+
+    def _get_link_url(self) -> str | None:
+        url = self.link_entry.get_text().strip()
+        return url or None
+
+
+    def _on_link_changed(self, _entry):
+        if self.suppress_composer_save:
+            return
+
+        self._schedule_composer_state_save()
+        self._update_drop_button_state()
+
+    def _link_validation_error( self, action: str, destinations: list[dict], 
+                               image_path: Path | None, link_url: str | None, ) -> str | None:
+        if not link_url:
+            return None
+
+        if image_path is not None:
+            return ( "Remove the image before attaching a link." )
+
+        if action == "idea":
+            return ( "Link attachments are available for Queue and Draft only." )
+
+        for destination in destinations:
+            try:
+                _build_link_metadata( link_url, destination.get("service") )
+
+            except ValueError as exception:
+                return ( f"{destination['name']}: {exception}" )
+
+        return None

@@ -12,6 +12,7 @@ DEFAULT_STATE = {
     "channel_ids": [],
     "organization_id": None,
     "image": None,
+    "link_url": "",
 }
 
 def get_composer_state_path() -> Path:
@@ -92,6 +93,10 @@ def load_composer_state() -> dict:
             and Path(original_filename).name == original_filename
         ):
             state["image"] = { "cached_filename": cached_filename, "original_filename": original_filename, }
+
+    link_url = saved.get("link_url")
+    if isinstance(link_url, str):
+        state["link_url"] = link_url[:2048]
 
     return state
 
