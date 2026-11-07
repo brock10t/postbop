@@ -10,7 +10,8 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 
 from .api.buffer_client import ( create_draft_post, create_idea, create_queue_post,
-                                get_account, get_channels, BufferRateLimitError )
+                                get_account, get_channels, BufferRateLimitError, 
+                                BufferSubmissionUncertainError )
 from .api.buffer_auth import exchange_authorization_code
 from .api.companion import ( activate_media_credential, create_oauth_session, get_oauth_result )
 from .api.oauth import ( build_authorization_url, generate_code_challenge, generate_code_verifier,
@@ -76,6 +77,8 @@ class PostBopWindow(Adw.ApplicationWindow):
         self.retry_all_destinations = []
         self.retry_image_path = None
         self.retry_image_url = None
+        self.retry_uncertain = []
+        self.retry_failures = []
 
         self.retry_available_at = None
         self.retry_timer_source_id = None
@@ -283,7 +286,23 @@ class PostBopWindow(Adw.ApplicationWindow):
         self.retry_button.set_halign( Gtk.Align.START )
         self.retry_button.connect( "clicked", self._on_retry_clicked )
 
-        error_box.append( self.retry_button )
+        error_actions = Gtk.Box( orientation=Gtk.Orientation.HORIZONTAL, spacing=6 )
+
+        error_actions.set_halign(Gtk.Align.START)
+        error_actions.append(self.retry_button)
+
+        self.open_buffer_error_button = Gtk.Button( label="Open Buffer" )
+        self.open_buffer_error_button.set_visible(False)
+        self.open_buffer_error_button.connect( "clicked", self._on_open_buffer_for_verification )
+        error_actions.append( self.open_buffer_error_button )
+
+        self.resolve_unknown_button = Gtk.Button( label="Resolve Unknown" )
+        self.resolve_unknown_button.set_visible(False)
+        self.resolve_unknown_button.connect( "clicked", self._on_resolve_unknown_clicked )
+        error_actions.append( self.resolve_unknown_button )
+
+        error_box.append( error_actions )
+
         self.error_revealer.set_child( error_box )
 
         root.append( self.error_revealer )
@@ -746,6 +765,38 @@ class PostBopWindow(Adw.ApplicationWindow):
 
                 logger.info( "Completed Buffer %s action for %s", action, destination["id"] )
 
+            except BufferSubmissionUncertainError as exception:
+                logger.warning(
+                    "Uncertain Buffer %s submission for %s: %s",
+                    action, destination["id"], exception,
+                )
+
+                failures.append({
+                    "destination": destination,
+                    "error": (
+                        "Submission status unknown. "
+                        "Check Buffer before trying this channel again."
+                    ),
+                    "retry_after": None,
+                    "rate_limited": False,
+                    "uncertain": True,
+                })
+
+                # These destinations were definitely not attempted. They can be retried safely.
+                for remaining in destinations[index + 1:]:
+                    failures.append({
+                        "destination": remaining,
+                        "error": (
+                            "Not attempted because a previous "
+                            "submission could not be confirmed."
+                        ),
+                        "retry_after": None,
+                        "rate_limited": False,
+                        "uncertain": False,
+                    })
+
+                break
+
             except BufferRateLimitError as exception:
                 logger.warning( "Buffer rate limit reached" )
 
@@ -779,80 +830,40 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         GLib.idle_add( self._finish_drop, action, text, all_destinations, successes, failures, image_path, image_url )
 
-    def _finish_drop( self, action: str, text: str, destinations: list[dict], successes: list[dict], failures: list[dict], 
-                     image_path: Path | None = None, image_url: str | None = None ):
+    def _finish_drop( self, action: str, text: str, destinations: list[dict], successes: list[dict],
+                     failures: list[dict], image_path: Path | None = None, image_url: str | None = None ):
         
         self._set_submitting(False)
 
-        total = ( len(successes) + len(failures) )
+        # A retry only attempted the safe destinations. Preserve uncertain outcomes from earlier attempts.
+        if self.retry_action is not None:
+            failure_ids = {
+                failure["destination"]["id"]
+                for failure in failures
+            }
+
+            for uncertain in self.retry_uncertain:
+                channel_id = ( uncertain["destination"]["id"] )
+
+                if channel_id not in failure_ids:
+                    failures.append( uncertain )
 
         if failures:
-            self._set_retry_state( action, text, destinations, failures, image_path, image_url )
-
-            if successes:
-                self.status_label.set_text( f"Completed {len(successes)} of {total} destinations." )
-            else:
-                self.status_label.set_text( "Buffer could not complete the action." )
+            self._set_retry_state(
+                action,
+                text,
+                destinations,
+                failures,
+                image_path,
+                image_url,
+            )
 
             return
 
-        self._clear_retry_state()
-
-        self._remember_successful_action( action, destinations )
-
-        buffer = self.composer.get_buffer()
-
-        self.suppress_composer_save = True
-
-        buffer.set_text("")
-
-        if self.selected_image_path is not None:
-            try:
-                delete_cached_image( self.selected_image_path )
-
-            except (OSError, ValueError):
-                logger.exception( "Unable to clean up cached image after successful Drop" )
-
-            self.selected_image_path = None
-            self.selected_image_original_filename = None
-
-            self.image_preview.set_paintable( None )
-            self.image_filename_label.set_text( "" )
-            self.image_preview_box.set_visible( False )
-            self.attach_image_button.set_label( "Attach Image" )
-
-        self.suppress_composer_save = False
-
-        clear_composer_state()
-
-        self.composer_state = {
-            "text": "",
-            "action": "queue",
-            "channel_ids": [],
-            "organization_id": None,
-            "image": None,
-        }
-
-        self.has_unfinished_composer = False
-
-        if action == "idea":
-            self.status_label.set_text( "Idea dropped to Buffer." )
-        elif action == "draft":
-            self.status_label.set_text( f"Dropped to Draft for {len(successes)} Buffer {'channel' if len(successes) == 1 else 'channels'}." )
-        else:
-            self.status_label.set_text( f"Dropped to {len(successes)} Buffer {'channel' if len(successes) == 1 else 'channels'}.")
-
-        self._notify_success( action, len(successes) )
-
-        if not self.preferences[ "keep_open_after_success" ]:
-            application = self.get_application()
-
-            if application is not None:
-                application.remain_alive_for_notification( 5 )
-            self.close()
-            return
-
-        self.composer.grab_focus()
+        self._complete_drop_success(
+            action,
+            destinations,
+        )
 
     def _remember_successful_action( self, action: str, destinations: list[dict] ):
         self.preferences[ "last_action" ] = action
@@ -982,44 +993,82 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         return False
 
-    def _set_retry_state( self, action: str, text: str, all_destinations: list[dict], failures: list[dict], 
+    def _set_retry_state( self, action: str, text: str, all_destinations: list[dict], failures: list[dict],
                          image_path: Path | None = None, image_url: str | None = None ):
         
         self.retry_action = action
         self.retry_text = text
         self.retry_image_path = image_path
         self.retry_image_url = image_url
-        self.retry_all_destinations = ( all_destinations )
 
-        self.retry_destinations = [ failure["destination"] for failure in failures ]
+        self.retry_all_destinations = ( all_destinations.copy() )
 
-        lines = []
-
-        for failure in failures:
-            name = failure[ "destination" ]["name"]
-            lines.append( f"{name}: {failure['error']}")
-
-        self.error_label.set_text( "\n".join(lines) )
+        self.retry_failures = [
+            failure.copy()
+            for failure in failures
+        ]
 
         retry_delays = [
             failure["retry_after"]
             for failure in failures
-            if failure.get(
-                "retry_after"
-            ) is not None
+            if failure.get("retry_after") is not None
         ]
 
         if retry_delays:
-            retry_after = max( retry_delays )
-            self.retry_available_at = ( time.monotonic() + retry_after )
+            self.retry_available_at = ( time.monotonic() + max(retry_delays) )
         else:
             self.retry_available_at = None
 
-        self.error_revealer.set_reveal_child( True )
+        self._refresh_retry_display()
+
+    def _refresh_retry_display(self):
+        self.retry_uncertain = [
+            failure
+            for failure in self.retry_failures
+            if failure.get("uncertain", False)
+        ]
+
+        self.retry_destinations = [
+            failure["destination"]
+            for failure in self.retry_failures
+            if not failure.get("uncertain", False)
+        ]
+
+        lines = []
+
+        for failure in self.retry_failures:
+            name = failure["destination"]["name"]
+            message = failure["error"]
+
+            if failure.get("uncertain", False):
+                lines.append( f"{name}: UNKNOWN — {message}" )
+            else:
+                lines.append( f"{name}: {message}" )
+
+        self.error_label.set_text( "\n".join(lines) )
+
+        has_uncertain = bool( self.retry_uncertain )
+
+        self.resolve_unknown_button.set_visible( has_uncertain )
+        self.open_buffer_error_button.set_visible( has_uncertain )
+        self.retry_button.set_visible( bool(self.retry_destinations) )
+        self.error_revealer.set_reveal_child( bool(self.retry_failures) )
+
+        total = len( self.retry_all_destinations )
+
+        completed = total - len( self.retry_failures )
+
+        if has_uncertain:
+            self.status_label.set_text(
+                f"Completed {completed} of {total} destinations. "
+                f"{len(self.retry_uncertain)} require verification."
+            )
+
+        else:
+            self.status_label.set_text( f"Completed {completed} of {total} destinations." )
 
         self._start_retry_timer()
         self._update_drop_button_state()
-
 
     def _clear_retry_state(self):
         self.retry_action = None
@@ -1029,6 +1078,12 @@ class PostBopWindow(Adw.ApplicationWindow):
         self.retry_available_at = None
         self.retry_image_path = None
         self.retry_image_url = None
+        self.retry_uncertain = []
+        self.retry_failures = []
+        self.retry_uncertain = []
+
+        self.resolve_unknown_button.set_visible(False)
+        self.open_buffer_error_button.set_visible(False)
 
         if self.retry_timer_source_id is not None:
             GLib.source_remove( self.retry_timer_source_id )
@@ -1045,50 +1100,41 @@ class PostBopWindow(Adw.ApplicationWindow):
             GLib.source_remove( self.retry_timer_source_id )
             self.retry_timer_source_id = None
 
-        if self.retry_available_at is None:
-            self.retry_button.set_label( "Retry Failed" )
-            self.retry_button.set_sensitive( not self.is_submitting )
-            return
-
-        self.retry_timer_source_id = ( GLib.timeout_add_seconds( 1, self._update_retry_button ) )
+        if (
+            self.retry_available_at is not None
+            and self.retry_destinations
+        ):
+            self.retry_timer_source_id = (
+                GLib.timeout_add_seconds( 1, self._update_retry_button )
+            )
 
         self._update_retry_button()
 
     def _update_retry_button(self):
-        if self.retry_action is None:
-            self.retry_timer_source_id = None
-            return False
+        can_retry = (
+            self.retry_action is not None
+            and bool(self.retry_destinations)
+            and not self.is_submitting
+        )
 
-        if self.is_submitting:
-            self.retry_button.set_sensitive( False )
-            return True
+        if self.retry_available_at is not None:
+            remaining = max(
+                0, math.ceil( self.retry_available_at - time.monotonic() )
+            )
 
-        if self.retry_available_at is None:
-            self.retry_button.set_label( "Retry Failed" )
-            self.retry_button.set_sensitive( True )
-            self.retry_timer_source_id = None
-            return False
+            if remaining > 0:
+                self.retry_button.set_label( f"Retry Failed ({remaining}s)" )
+                self.retry_button.set_sensitive(False)
+                return True
 
-        remaining = math.ceil( self.retry_available_at - time.monotonic() )
-
-        if remaining <= 0:
             self.retry_available_at = None
-            self.retry_button.set_label( "Retry Failed" )
-            self.retry_button.set_sensitive( True )
-            self.retry_timer_source_id = None
-            return False
 
-        minutes, seconds = divmod( remaining, 60 )
+        self.retry_button.set_label( "Retry Failed" )
 
-        if minutes:
-            label = ( f"Retry in {minutes}m {seconds}s" )
-        else:
-            label = ( f"Retry in {seconds}s" )
+        self.retry_button.set_sensitive( can_retry )
+        self.retry_timer_source_id = None
 
-        self.retry_button.set_label(label)
-        self.retry_button.set_sensitive( False )
-
-        return True
+        return False
 
     def _on_retry_clicked( self, _button ):
         if ( self.retry_action is None or not self.retry_destinations ):
@@ -1547,3 +1593,168 @@ class PostBopWindow(Adw.ApplicationWindow):
             return True
 
         return self._attach_image_from_path( Path(path) )
+
+    def _on_open_buffer_for_verification( self, _button ):
+        try:
+            Gio.AppInfo.launch_default_for_uri( "https://publish.buffer.com", None )
+        except GLib.Error:
+            logger.exception( "Unable to open Buffer" )
+            self.status_label.set_text( "Unable to open Buffer in the browser." )
+
+    def _on_resolve_unknown_clicked( self, _button ):
+        if (
+            self.is_submitting
+            or not self.retry_uncertain
+        ):
+            return
+
+        failure = self.retry_uncertain[0]
+        destination = failure["destination"]
+
+        dialog = Adw.AlertDialog.new(
+            "Resolve Unknown Submission",
+            (
+                f"PostBop could not confirm whether Buffer "
+                f"created the post for {destination['name']}.\n\n"
+                "Check the appropriate channel in Buffer "
+                "before choosing an action.\n\n"
+                "Found the post: mark this destination complete.\n"
+                "Post not found: allow another attempt, "
+                "understanding that a duplicate is still possible."
+            ),
+        )
+
+        dialog.add_response( "cancel", "Cancel" )
+        dialog.add_response( "posted", "Mark as Posted" )
+        dialog.add_response( "retry", "Allow Retry" )
+
+        dialog.set_default_response( "cancel" )
+        dialog.set_close_response( "cancel" )
+
+        dialog.set_response_appearance( "retry", Adw.ResponseAppearance.DESTRUCTIVE )
+
+        dialog.connect( "response", self._on_uncertain_resolution, destination["id"] )
+
+        dialog.present(self)
+
+    def _on_uncertain_resolution( self, _dialog, response: str, channel_id: str ):
+        if response == "cancel":
+            return
+
+        if (
+            self.is_submitting
+            or self.retry_action is None
+        ):
+            return
+
+        failure = next(
+            (
+                item
+                for item in self.retry_failures
+                if (
+                    item.get("uncertain", False)
+                    and item["destination"]["id"]
+                    == channel_id
+                )
+            ),
+            None,
+        )
+
+        if failure is None:
+            return
+
+        if response == "posted":
+            # The user verified the post in Buffer. There is nothing to resubmit.
+            self.retry_failures.remove( failure )
+
+        elif response == "retry":
+            # The user explicitly authorized another attempt.
+            failure["uncertain"] = False
+            failure["rate_limited"] = False
+            failure["retry_after"] = None
+
+            failure["error"] = ( "Manually cleared for retry. A duplicate remains possible." )
+
+        else:
+            return
+
+        if not self.retry_failures:
+            # Every destination is now confirmed or manually verified.
+            self._complete_drop_success(
+                self.retry_action,
+                self.retry_all_destinations,
+            )
+
+            return
+
+        self._refresh_retry_display()
+
+    def _complete_drop_success( self, action: str, destinations: list[dict] ):
+        total = len(destinations)
+
+        self._clear_retry_state()
+        self._remember_successful_action( action, destinations )
+
+        buffer = self.composer.get_buffer()
+
+        self.suppress_composer_save = True
+
+        buffer.set_text("")
+
+        if self.selected_image_path is not None:
+            try:
+                delete_cached_image( self.selected_image_path )
+
+            except (OSError, ValueError):
+                logger.exception( "Unable to clean up cached image after successful Drop" )
+
+            self.selected_image_path = None
+            self.selected_image_original_filename = None
+
+            self.image_preview.set_paintable(None)
+            self.image_filename_label.set_text("")
+            self.image_preview_box.set_visible(False)
+
+            self.attach_image_button.set_label( "Attach Image" )
+
+        self.suppress_composer_save = False
+
+        clear_composer_state()
+
+        self.composer_state = {
+            "text": "",
+            "action": "queue",
+            "channel_ids": [],
+            "organization_id": None,
+            "image": None,
+        }
+
+        self.has_unfinished_composer = False
+
+        if action == "idea":
+            self.status_label.set_text( "Idea dropped to Buffer." )
+
+        elif action == "draft":
+            self.status_label.set_text(
+                f"Dropped to Draft for {total} Buffer {'channel' if total == 1 else 'channels'}."
+            )
+
+        else:
+            self.status_label.set_text(
+                f"Dropped to {total} Buffer {'channel' if total == 1 else 'channels'}."
+            )
+
+        self._update_drop_button_state()
+
+        self._notify_success( action, total )
+
+        if not self.preferences["keep_open_after_success"]:
+            application = self.get_application()
+
+            if application is not None:
+                application.remain_alive_for_notification( 5 )
+
+            self.close()
+            return
+
+        self.composer.grab_focus()
