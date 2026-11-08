@@ -4,6 +4,9 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 .mypy_cache/
+/.pybuild/
+/build/
+/src/*.egg-info/
 
 # Virtual environments
 .venv/
@@ -37,3 +40,11 @@ gschemas.compiled
 # OS files
 .DS_Store
 Thumbs.db
+
+# Debian packaging artifacts
+/debian/.debhelper/
+/debian/*.debhelper
+/debian/postbop/
+/debian/files
+/debian/*.substvars
+/debian/debhelper-build-stamp
