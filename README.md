@@ -275,13 +275,15 @@ The desktop application does not include telemetry, advertising trackers, or thi
 
 ### Authentication and Credentials
 
-PostBop connects to Buffer using OAuth authorization.
+PostBop connects to Buffer using browser-based OAuth authorization with PKCE.
 
-Authentication begins in your web browser, and the companion service helps relay the authorization result to the desktop application.
+During authentication, the companion service receives Buffer's authorization callback and temporarily stores the authorization code until the desktop application retrieves it. Successfully retrieved authorization codes are cleared immediately, while expired, unclaimed authorization results are cleared through a scheduled cleanup process.
 
-Buffer access and refresh tokens are stored locally using the system's Secret Service, typically provided by GNOME Keyring.
+The desktop application exchanges the authorization code directly with Buffer. Access and refresh tokens are stored locally using the system's Secret Service, typically provided by GNOME Keyring.
 
-When activating image-hosting access, PostBop sends a Buffer access token to the companion service, which uses it to verify the associated Buffer account through Buffer's API. The companion service issues a separate credential for authenticated media uploads and stores a cryptographic hash of that credential rather than the credential itself.
+When activating image-hosting functionality, PostBop sends a Buffer access token to the companion service to verify the associated Buffer account. The service uses that token to communicate with Buffer and records the verified account identifier.
+
+A separate credential is issued for authenticated media uploads. The companion service stores a cryptographic hash of this credential rather than the credential itself.
 
 PostBop does not require users to provide their Buffer account passwords directly to the desktop application.
 

@@ -131,4 +131,22 @@ class OAuthSessionRepository
             throw $exception;
         }
     }
+
+    public function clearExpiredResults(): int {
+        $statement = $this->connection->prepare(
+            'UPDATE oauth_sessions
+                SET
+                    authorization_code = NULL,
+                    oauth_error = NULL
+                WHERE expires_at <= CURRENT_TIMESTAMP
+                AND (
+                    authorization_code IS NOT NULL
+                    OR oauth_error IS NOT NULL
+                )'
+        );
+
+        $statement->execute();
+
+        return $statement->rowCount();
+    }
 }
