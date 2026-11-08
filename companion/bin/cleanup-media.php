@@ -5,6 +5,7 @@ use PostBop\Companion\Config;
 use PostBop\Companion\Database;
 use PostBop\Companion\MediaStorage;
 use PostBop\Companion\MediaUploadRepository;
+use PostBop\Companion\OAuthSessionRepository;
 
 require dirname(__DIR__) . '/vendor/autoload.php';
 
@@ -39,9 +40,16 @@ try {
 
     printf( "PostBop media cleanup: %d deleted, %d failed\n", $deleted, $failed );
 
+    // Clear authorization results belonging to expired OAuth sessions.
+    $oauthRepository = new OAuthSessionRepository( $database->connection() );
+
+    $clearedSessions = $oauthRepository->clearExpiredResults();
+
+    printf( "PostBop OAuth cleanup: %d expired results cleared\n", $clearedSessions );
+
     exit( $failed === 0 ? 0 : 1 );
 
 } catch (Throwable $exception) {
-    fwrite( STDERR, sprintf( "PostBop media cleanup failed: %s\n", $exception->getMessage() ) );
+    fwrite( STDERR, sprintf( "PostBop cleanup failed: %s\n", $exception->getMessage() ) );
     exit(1);
 }
