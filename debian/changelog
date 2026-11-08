@@ -1,0 +1,21 @@
+postbop (0.1.0-3) unstable; urgency=medium
+
+  * Correct bug preventing url attachment to Facebook
+
+ -- 10T Web Design <b@10t.co>  Sat, 07 Nov 2026 19:45:00 -0500
+
+postbop (0.1.0-2) unstable; urgency=medium
+
+  * Improve channel selector layout for accounts with multiple channels.
+
+ -- 10T Web Design <b@10t.co>  Sat, 07 Nov 2026 19:00:00 -0500
+
+postbop (0.1.0-1) unstable; urgency=medium
+
+  * Initial PostBop release.
+  * Support Buffer Queue, Draft, and Idea submissions.
+  * Add image and native link attachments.
+  * Add composer recovery and submission error handling.
+  * Provide native GTK4/libadwaita desktop integration.
+
+ -- 10T Web Design <b@10t.co>  Sat, 07 Nov 2026 17:00:00 -0500

@@ -2,9 +2,9 @@
 Name=PostBop
 Comment=Quickly send content into a Buffer publishing workflow
 Exec=postbop
+Icon=co._10t.PostBop
 Terminal=false
 Type=Application
 Categories=Network;Utility;
 StartupNotify=true
-DBusActivatable=true
-X-GNOME-UsesNotifications=true
+DBusActivatable=false

@@ -86,7 +86,7 @@ class PostBopWindow(Adw.ApplicationWindow):
         self.retry_timer_source_id = None
 
         self.set_title( "PostBop" )
-        self.set_default_size( 900, 500 )
+        self.set_default_size( 900, 550 )
 
         self.selected_image_path: Path | None = None
         self.selected_image_original_filename: str | None = None
@@ -299,6 +299,7 @@ class PostBopWindow(Adw.ApplicationWindow):
         right_content.append( self.destination_label )
 
         self.destination_stack = Gtk.Stack()
+        self.destination_stack.set_vhomogeneous(False)
 
         self.connect_box = Gtk.Box( orientation=Gtk.Orientation.VERTICAL, spacing=8 )
 
@@ -321,11 +322,7 @@ class PostBopWindow(Adw.ApplicationWindow):
 
         self.channel_box.append( self.loading_label )
 
-        channel_scroll = Gtk.ScrolledWindow()
-        channel_scroll.set_min_content_height( 140 )
-        channel_scroll.set_child( self.channel_box )
-
-        self.destination_stack.add_named( channel_scroll, "channels" )
+        self.destination_stack.add_named( self.channel_box, "channels" )
 
         self.organization_model = Gtk.StringList()
         self.organization_dropdown = Gtk.DropDown( model=self.organization_model )

@@ -1,0 +1,29 @@
+Source: postbop
+Section: utils
+Priority: optional
+Maintainer: 10T Web Design <b@10t.co>
+Build-Depends:
+ debhelper-compat (= 13),
+ dh-sequence-python3,
+ pybuild-plugin-pyproject,
+ python3-all,
+ python3-setuptools (>= 68)
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+
+Package: postbop
+Architecture: all
+Depends:
+ ${misc:Depends},
+ ${python3:Depends},
+ python3-gi,
+ gir1.2-gtk-4.0,
+ gir1.2-adw-1,
+ gir1.2-secret-1,
+ gir1.2-notify-0.7
+Description: Native Linux desktop client for Buffer publishing
+ PostBop is a GTK4 and libadwaita desktop application that makes
+ it easy to send posts, drafts, and ideas to Buffer.
+ .
+ It supports multiple publishing channels, image and link attachments,
+ character-limit validation, and composer recovery.
