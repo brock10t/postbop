@@ -86,7 +86,7 @@ class PostBopWindow(Adw.ApplicationWindow):
         self.retry_timer_source_id = None
 
         self.set_title( "PostBop" )
-        self.set_default_size( 900, 500 )
+        self.set_default_size( 900, 550 )
 
         self.selected_image_path: Path | None = None
         self.selected_image_original_filename: str | None = None

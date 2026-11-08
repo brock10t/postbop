@@ -502,7 +502,6 @@ LINK_ATTACHMENT_SERVICES = {
     "threads",
 }
 
-
 def _build_link_metadata( link_url: str | None, service: str | None ) -> dict | None:
     if not link_url:
         return None
@@ -542,10 +541,16 @@ def _build_link_metadata( link_url: str | None, service: str | None ) -> dict | 
             f"{service or 'this channel'}."
         )
 
-    return {
-        service: {
-            "linkAttachment": {
-                "url": url,
-            }
+    metadata = {
+        "linkAttachment": {
+            "url": url,
         }
+    }
+
+    # Facebook requires a post type even for regular link attachments.
+    if service == "facebook":
+        metadata["type"] = "post"
+
+    return {
+        service: metadata
     }
